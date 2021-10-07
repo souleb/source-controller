@@ -103,6 +103,9 @@ var _ = BeforeSuite(func() {
 	err = sourcev1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 
+	err = sourcev1.AddToScheme(scheme.Scheme)
+	Expect(err).NotTo(HaveOccurred())
+
 	// +kubebuilder:scaffold:scheme
 
 	Expect(loadExampleKeys()).To(Succeed())
