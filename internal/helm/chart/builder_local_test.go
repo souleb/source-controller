@@ -236,6 +236,40 @@ fullnameOverride: "full-foo-name-override"`),
 	}
 }
 
+func TestLocalBuilder_Build_CachedChart(t *testing.T) {
+	g := NewWithT(t)
+
+	workDir, err := os.MkdirTemp("", "local-builder-")
+	g.Expect(err).ToNot(HaveOccurred())
+	defer os.RemoveAll(workDir)
+
+	reference := LocalReference{Path: "./../testdata/charts/helmchart"}
+
+	dm := NewDependencyManager()
+	b := NewLocalBuilder(dm)
+
+	// Build first time.
+	targetPath := "/tmp/local-chart-" + randStringRunes(5) + ".tgz"
+	buildOpts := BuildOptions{}
+	cb, err := b.Build(context.TODO(), reference, targetPath, buildOpts)
+	g.Expect(err).ToNot(HaveOccurred())
+
+	// Set the result as the CachedChart for second build.
+	buildOpts.CachedChart = cb.Path
+
+	targetPath2 := "/tmp/local-chart-" + randStringRunes(5) + ".tgz"
+	defer os.RemoveAll(targetPath2)
+	cb, err = b.Build(context.TODO(), reference, targetPath2, buildOpts)
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(cb.Path).To(Equal(targetPath))
+
+	// Rebuild with build option Force.
+	buildOpts.Force = true
+	cb, err = b.Build(context.TODO(), reference, targetPath2, buildOpts)
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(cb.Path).To(Equal(targetPath2))
+}
+
 func Test_mergeFileValues(t *testing.T) {
 	tests := []struct {
 		name    string
