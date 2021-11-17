@@ -21,6 +21,7 @@ import (
 	"context"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -346,6 +347,28 @@ func Test_mergeChartValues(t *testing.T) {
 			g.Expect(got).To(Equal(tt.want))
 		})
 	}
+}
+
+func Test_validatePackageAndWriteToPath(t *testing.T) {
+	g := NewWithT(t)
+
+	tmpDir, err := os.MkdirTemp("", "validate-pkg-chart-")
+	g.Expect(err).ToNot(HaveOccurred())
+	defer os.RemoveAll(tmpDir)
+
+	validF, err := os.Open("./../testdata/charts/helmchart-0.1.0.tgz")
+	g.Expect(err).ToNot(HaveOccurred())
+
+	chartPath := filepath.Join(tmpDir, "chart.tgz")
+	defer os.Remove(chartPath)
+	err = validatePackageAndWriteToPath(validF, chartPath)
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(chartPath).To(BeARegularFile())
+
+	emptyF, err := os.Open("./../testdata/charts/empty.tgz")
+	g.Expect(err).ToNot(HaveOccurred())
+	err = validatePackageAndWriteToPath(emptyF, filepath.Join(tmpDir, "out.tgz"))
+	g.Expect(err).To(HaveOccurred())
 }
 
 func Test_pathIsDir(t *testing.T) {
