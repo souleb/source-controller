@@ -20,20 +20,21 @@ import (
 	"archive/tar"
 	"context"
 	"fmt"
+	"sort"
+	"strings"
+	"time"
+
 	"github.com/Masterminds/semver/v3"
 	"github.com/fluxcd/pkg/apis/meta"
 	"github.com/fluxcd/pkg/runtime/events"
 	"github.com/fluxcd/pkg/runtime/metrics"
 	"github.com/fluxcd/pkg/runtime/predicates"
 	sourcev1 "github.com/fluxcd/source-controller/api/v1beta1"
+	"github.com/fluxcd/source-controller/pkg/registry"
 	"github.com/fluxcd/source-controller/pkg/sourceignore"
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
-	"github.com/go-logr/logr"
-	"github.com/google/go-containerregistry/pkg/authn"
-	"github.com/google/go-containerregistry/pkg/authn/k8schain"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
-	"github.com/google/go-containerregistry/pkg/v1/remote"
 	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -45,9 +46,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
-	"sort"
-	"strings"
-	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -70,6 +68,7 @@ type OCIRepositoryReconciler struct {
 	EventRecorder         kuberecorder.EventRecorder
 	ExternalEventRecorder *events.Recorder
 	MetricsRecorder       *metrics.Recorder
+	registryClient        *registry.Client
 }
 
 type OCIRepositoryReconcilerOptions struct {
@@ -94,7 +93,7 @@ func (r *OCIRepositoryReconciler) SetupWithManagerAndOptions(mgr ctrl.Manager, o
 
 func (r *OCIRepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	start := time.Now()
-	log := logr.FromContext(ctx)
+	log := ctrl.LoggerFrom(ctx)
 
 	var repository sourcev1.OCIRepository
 	if err := r.Get(ctx, req.NamespacedName, &repository); err != nil {
@@ -187,7 +186,7 @@ func (r *OCIRepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 // event emits a Kubernetes event and forwards the event to notification controller if configured
 func (r *OCIRepositoryReconciler) event(ctx context.Context, repository sourcev1.OCIRepository, severity, msg string) {
-	log := logr.FromContext(ctx)
+	log := ctrl.LoggerFrom(ctx)
 
 	if r.EventRecorder != nil {
 		r.EventRecorder.Eventf(&repository, "Normal", severity, msg)
@@ -220,13 +219,11 @@ func (r *OCIRepositoryReconciler) gc(repository sourcev1.OCIRepository) error {
 	return nil
 }
 
-// keychain generates the credential keychain based on the resource
-// configuration. If no auth is specified a default keychain with
-// anonymous access is returned
-func (r *OCIRepositoryReconciler) keychain(ctx context.Context, repository sourcev1.OCIRepository) (authn.Keychain, error) {
+// credentials retrieves the credentials from Authentication
+func (r *OCIRepositoryReconciler) credentials(ctx context.Context, repository sourcev1.OCIRepository) (registry.LoginOption, error) {
 	auth := repository.Spec.Authentication
 	if auth == nil {
-		return authn.DefaultKeychain, nil
+		return nil, fmt.Errorf("no authentication configured")
 	}
 
 	pullSecretNames := sets.NewString()
@@ -249,45 +246,63 @@ func (r *OCIRepositoryReconciler) keychain(ctx context.Context, repository sourc
 	}
 
 	// lookup image pull secrets
-	imagePullSecrets := make([]corev1.Secret, len(pullSecretNames))
-	for i, imagePullSecretName := range pullSecretNames.List() {
+
+	for _, imagePullSecretName := range pullSecretNames.List() {
 		imagePullSecret := corev1.Secret{}
 		err := r.Get(ctx, types.NamespacedName{Namespace: repository.Namespace, Name: imagePullSecretName}, &imagePullSecret)
 		if err != nil {
 			return nil, err
 		}
-		imagePullSecrets[i] = imagePullSecret
+
+		// retrieve the username and password from the secret
+		if len(imagePullSecret.Data) != 0 {
+			login := registry.LoginOptBasicAuth(string(imagePullSecret.Data["username"]), string(imagePullSecret.Data["password"]))
+			return login, nil
+		}
 	}
 
-	return k8schain.NewFromPullSecrets(ctx, imagePullSecrets)
+	return nil, fmt.Errorf("no credentials found")
 }
 
 func (r *OCIRepositoryReconciler) reconcile(ctx context.Context, repository sourcev1.OCIRepository) (sourcev1.OCIRepository, error) {
 	ociCtx, cancel := context.WithTimeout(ctx, repository.Spec.Timeout.Duration)
 	defer cancel()
 
-	keychain, err := r.keychain(ociCtx, repository)
+	// Login to the registry
+	loginOpt, err := r.credentials(ociCtx, repository)
 	if err != nil {
 		return sourcev1.OCIRepositoryNotReady(repository, sourcev1.AuthenticationFailedReason, err.Error()), err
 	}
 
-	ref, err := r.reference(ociCtx, keychain, repository)
+	hostRegistry := strings.TrimPrefix(strings.Split(repository.Spec.URL, "/")[0], "https://")
+	hostRegistry = strings.TrimPrefix(hostRegistry, "http://")
+	hostRegistry = strings.TrimPrefix(hostRegistry, "oci://")
+
+	err = r.registryClient.Login(hostRegistry, loginOpt)
+	if err != nil {
+		return sourcev1.OCIRepositoryNotReady(repository, sourcev1.AuthenticationFailedReason, err.Error()), err
+	}
+
+	ref, err := r.reference(repository)
 	if err != nil {
 		return sourcev1.OCIRepositoryNotReady(repository, sourcev1.OCIRepositoryOperationFailedReason, err.Error()), err
 	}
 
-	image, err := remote.Image(ref, remote.WithAuthFromKeychain(keychain))
+	isHelm := strings.Contains(repository.Spec.URL, "oci://")
+	if isHelm {
+		// Helm chart
+		message := fmt.Sprintf("Helm Artifact with ref: %s", ref)
+		return sourcev1.OCIRepositoryReady(repository, artifact, url, sourcev1.OCIRepositoryOperationSucceedReason, message), nil
+	}
+
+	// Pull the image
+	pullResult, err := r.registryClient.Pull(ref.String())
 	if err != nil {
 		return sourcev1.OCIRepositoryNotReady(repository, sourcev1.OCIRepositoryOperationFailedReason, err.Error()), err
 	}
 
-	digest, err := image.Digest()
-	if err != nil {
-		return sourcev1.OCIRepositoryNotReady(repository, sourcev1.OCIRepositoryOperationFailedReason, err.Error()), err
-	}
-
-	revision := fmt.Sprintf("%s@%s", ref.Context().Name(), digest)
-	artifact := r.Storage.NewArtifactFor(repository.Kind, repository.GetObjectMeta(), revision, fmt.Sprintf("%s.tar.gz", digest))
+	revision := fmt.Sprintf("%s@%s", ref.Context().Name(), pullResult.Config.Digest)
+	artifact := r.Storage.NewArtifactFor(repository.Kind, repository.GetObjectMeta(), revision, fmt.Sprintf("%s.tar.gz", pullResult.Config.Digest))
 
 	// return early on unchanged digest
 	if apimeta.IsStatusConditionTrue(repository.Status.Conditions, meta.ReadyCondition) && repository.GetArtifact().HasRevision(artifact.Revision) {
@@ -361,7 +376,7 @@ func (r *OCIRepositoryReconciler) reconcileDelete(ctx context.Context, repositor
 }
 
 func (r *OCIRepositoryReconciler) recordReadiness(ctx context.Context, repository sourcev1.OCIRepository) {
-	log := logr.FromContext(ctx)
+	log := ctrl.LoggerFrom(ctx)
 	if r.MetricsRecorder == nil {
 		return
 	}
@@ -384,7 +399,7 @@ func (r *OCIRepositoryReconciler) recordSuspension(ctx context.Context, reposito
 	if r.MetricsRecorder == nil {
 		return
 	}
-	log := logr.FromContext(ctx)
+	log := ctrl.LoggerFrom(ctx)
 
 	objRef, err := reference.GetReference(r.Scheme, &repository)
 	if err != nil {
@@ -414,7 +429,7 @@ func (r *OCIRepositoryReconciler) resetStatus(repository sourcev1.OCIRepository)
 	return repository, false
 }
 
-func (r *OCIRepositoryReconciler) reference(ctx context.Context, keychain authn.Keychain, repository sourcev1.OCIRepository) (name.Reference, error) {
+func (r *OCIRepositoryReconciler) reference(repository sourcev1.OCIRepository) (name.Reference, error) {
 	url := repository.Spec.URL
 
 	ref := repository.Spec.Reference
@@ -427,14 +442,10 @@ func (r *OCIRepositoryReconciler) reference(ctx context.Context, keychain authn.
 	}
 
 	if ref.SemVer != "" {
-		repo, err := name.NewRepository(url)
+		// get a sorted list of tags
+		tags, err := r.registryClient.Tags(url)
 		if err != nil {
-			return nil, err
-		}
-
-		tags, err := remote.List(repo, remote.WithAuthFromKeychain(keychain), remote.WithContext(ctx))
-		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to get tags for %s: %w", url, err)
 		}
 
 		c, err := semver.NewConstraint(ref.SemVer)
@@ -444,16 +455,16 @@ func (r *OCIRepositoryReconciler) reference(ctx context.Context, keychain authn.
 
 		var candidates []*semver.Version
 		for _, t := range tags {
-				v, err := semver.NewVersion(t)
-				if err != nil {
-					continue
-				}
+			v, err := semver.NewVersion(t)
+			if err != nil {
+				continue
+			}
 
-				if c != nil && !c.Check(v) {
-					continue
-				}
+			if c != nil && !c.Check(v) {
+				continue
+			}
 
-				candidates = append(candidates, v)
+			candidates = append(candidates, v)
 		}
 
 		if len(candidates) == 0 {
