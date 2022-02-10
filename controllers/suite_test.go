@@ -84,7 +84,6 @@ func TestMain(m *testing.M) {
 	testEnv = testenv.New(testenv.WithCRDPath(filepath.Join("..", "config", "crd", "bases")))
 
 	var err error
-<<<<<<< HEAD
 	testServer, err = testserver.NewTempArtifactServer()
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create a temporary storage server: %v", err))
@@ -136,71 +135,6 @@ func TestMain(m *testing.M) {
 	}).SetupWithManager(testEnv); err != nil {
 		panic(fmt.Sprintf("Failed to start HelmRepositoryReconciler: %v", err))
 	}
-=======
-	cfg, err = testEnv.Start()
-	Expect(err).ToNot(HaveOccurred())
-	Expect(cfg).ToNot(BeNil())
-
-	err = sourcev1.AddToScheme(scheme.Scheme)
-	Expect(err).NotTo(HaveOccurred())
-
-	err = sourcev1.AddToScheme(scheme.Scheme)
-	Expect(err).NotTo(HaveOccurred())
-
-	err = sourcev1.AddToScheme(scheme.Scheme)
-	Expect(err).NotTo(HaveOccurred())
-
-	err = sourcev1.AddToScheme(scheme.Scheme)
-	Expect(err).NotTo(HaveOccurred())
-
-	// +kubebuilder:scaffold:scheme
-
-	Expect(loadExampleKeys()).To(Succeed())
-
-	tmpStoragePath, err := os.MkdirTemp("", "source-controller-storage-")
-	Expect(err).NotTo(HaveOccurred(), "failed to create tmp storage dir")
-
-	storage, err = NewStorage(tmpStoragePath, "localhost:5050", time.Second*30)
-	Expect(err).NotTo(HaveOccurred(), "failed to create tmp storage")
-	// serve artifacts from the filesystem, as done in main.go
-	fs := http.FileServer(http.Dir(tmpStoragePath))
-	http.Handle("/", fs)
-	go http.ListenAndServe(":5050", nil)
-
-	k8sManager, err = ctrl.NewManager(cfg, ctrl.Options{
-		Scheme: scheme.Scheme,
-	})
-	Expect(err).ToNot(HaveOccurred())
-
-	err = (&GitRepositoryReconciler{
-		Client:  k8sManager.GetClient(),
-		Scheme:  scheme.Scheme,
-		Storage: storage,
-	}).SetupWithManager(k8sManager)
-	Expect(err).ToNot(HaveOccurred(), "failed to setup GtRepositoryReconciler")
-
-	err = (&HelmRepositoryReconciler{
-		Client:  k8sManager.GetClient(),
-		Scheme:  scheme.Scheme,
-		Storage: storage,
-		Getters: getter.Providers{getter.Provider{
-			Schemes: []string{"http", "https"},
-			New:     getter.NewHTTPGetter,
-		}},
-	}).SetupWithManager(k8sManager)
-	Expect(err).ToNot(HaveOccurred(), "failed to setup HelmRepositoryReconciler")
-
-	err = (&HelmChartReconciler{
-		Client:  k8sManager.GetClient(),
-		Scheme:  scheme.Scheme,
-		Storage: storage,
-		Getters: getter.Providers{getter.Provider{
-			Schemes: []string{"http", "https"},
-			New:     getter.NewHTTPGetter,
-		}},
-	}).SetupWithManager(k8sManager)
-	Expect(err).ToNot(HaveOccurred(), "failed to setup HelmChartReconciler")
->>>>>>> b9cc2be (Add support for using an OCI image as source)
 
 	go func() {
 		fmt.Println("Starting the test environment")
