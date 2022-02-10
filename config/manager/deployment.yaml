@@ -78,8 +78,12 @@ spec:
             mountPath: /data
           - name: tmp
             mountPath: /tmp
+          - name: oras-volume
+            mountPath: /.docker
       volumes:
         - name: data
           emptyDir: {}
         - name: tmp
+          emptyDir: {}
+        - name: oras-volume
           emptyDir: {}

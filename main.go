@@ -46,6 +46,7 @@ import (
 	sourcev1 "github.com/fluxcd/source-controller/api/v1beta1"
 	"github.com/fluxcd/source-controller/controllers"
 	"github.com/fluxcd/source-controller/internal/helm"
+	"github.com/fluxcd/source-controller/pkg/registry"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -223,6 +224,13 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "Bucket")
 		os.Exit(1)
 	}
+
+	rClient, err := registry.NewClient(registry.ClientOptWriter(os.Stdout))
+	if err != nil {
+		setupLog.Error(err, "unable to create registry client")
+		os.Exit(1)
+	}
+
 	if err = (&controllers.OCIRepositoryReconciler{
 		Client:                mgr.GetClient(),
 		Scheme:                mgr.GetScheme(),
@@ -230,6 +238,7 @@ func main() {
 		EventRecorder:         mgr.GetEventRecorderFor(controllerName),
 		ExternalEventRecorder: eventRecorder,
 		MetricsRecorder:       metricsRecorder,
+		RegistryClient:        rClient,
 	}).SetupWithManagerAndOptions(mgr, controllers.OCIRepositoryReconcilerOptions{
 		MaxConcurrentReconciles:   concurrent,
 		DependencyRequeueInterval: requeueDependency,
