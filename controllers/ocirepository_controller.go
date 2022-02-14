@@ -223,7 +223,7 @@ func (r *OCIRepositoryReconciler) gc(repository sourcev1.OCIRepository) error {
 func (r *OCIRepositoryReconciler) credentials(ctx context.Context, repository sourcev1.OCIRepository) (registry.LoginOption, error) {
 	auth := repository.Spec.Authentication
 	if auth == nil {
-		return nil, fmt.Errorf("no authentication configured")
+		return nil, nil
 	}
 
 	pullSecretNames := sets.NewString()
@@ -278,9 +278,11 @@ func (r *OCIRepositoryReconciler) reconcile(ctx context.Context, repository sour
 	hostRegistry = strings.TrimPrefix(hostRegistry, "http://")
 	hostRegistry = strings.TrimPrefix(hostRegistry, "oci://")
 
-	err = r.RegistryClient.Login(hostRegistry, loginOpt)
-	if err != nil {
-		return sourcev1.OCIRepositoryNotReady(repository, sourcev1.AuthenticationFailedReason, err.Error()), err
+	if loginOpt != nil {
+		err = r.RegistryClient.Login(hostRegistry, loginOpt)
+		if err != nil {
+			return sourcev1.OCIRepositoryNotReady(repository, sourcev1.AuthenticationFailedReason, err.Error()), err
+		}
 	}
 
 	ref, err := r.reference(repository)
@@ -429,7 +431,7 @@ func (r *OCIRepositoryReconciler) resetStatus(repository sourcev1.OCIRepository)
 }
 
 func (r *OCIRepositoryReconciler) reference(repository sourcev1.OCIRepository) (oras.Reference, error) {
-	url := repository.Spec.URL
+	url := strings.TrimPrefix(repository.Spec.URL, fmt.Sprintf("%s://", "oci"))
 
 	ref := repository.Spec.Reference
 	if ref == nil {
