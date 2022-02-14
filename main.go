@@ -220,10 +220,9 @@ func main() {
 
 	rClient, err := registry.NewClient(registry.ClientOptWriter(os.Stdout))
 	if err != nil {
-		setupLog.Error(err, "unable to create registry client")
+		setupLog.Error(err, "unable to create OCI registry client")
 		os.Exit(1)
 	}
-
 	if err = (&controllers.OCIRepositoryReconciler{
 		Client:                mgr.GetClient(),
 		Scheme:                mgr.GetScheme(),
