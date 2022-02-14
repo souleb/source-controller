@@ -192,6 +192,7 @@ func (in *OCIRepository) GetInterval() metav1.Duration {
 // +genclient
 // +genclient:Namespaced
 //+kubebuilder:object:root=true
+// +kubebuilder:resource:shortName=ocirepo
 //+kubebuilder:subresource:status
 //+kubebuilder:printcolumn:name="URL",type=string,JSONPath=`.spec.url`
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type==\"Ready\")].status",description=""
