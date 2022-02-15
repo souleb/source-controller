@@ -17,6 +17,7 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/containerd/containerd/remotes"
+	distributionSchema "github.com/distribution/distribution/manifest/schema2"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	helmTypes "helm.sh/helm/v3/pkg/registry"
@@ -214,6 +215,9 @@ func (c *Client) Pull(ref string) (*PullResult, error) {
 		helmTypes.ConfigMediaType,
 		helmTypes.ChartLayerMediaType,
 		helmTypes.ProvLayerMediaType,
+		distributionSchema.MediaTypeManifest,
+		distributionSchema.MediaTypeLayer,
+		distributionSchema.MediaTypeImageConfig,
 	}
 
 	var layers []ocispec.Descriptor
@@ -222,30 +226,39 @@ func (c *Client) Pull(ref string) (*PullResult, error) {
 	manifest, err := oras.Copy(ctx(c.out, c.debug), registryStore, parsedRef.String(), memoryStore, "",
 		oras.WithPullEmptyNameAllowed(),
 		oras.WithAllowedMediaTypes(allowedMediaTypes),
+		oras.WithAdditionalCachedMediaTypes(distributionSchema.MediaTypeManifest),
 		oras.WithLayerDescriptors(func(l []ocispec.Descriptor) {
 			layers = l
 		}))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("pulling %s failed: %s", parsedRef.String(), err)
 	}
 
 	var configDescriptor *ocispec.Descriptor
 
-	for k, descriptor := range layers {
-		switch descriptor.MediaType {
+	for i := len(layers) - 1; i >= 0; i-- {
+		switch descriptor := layers[i]; descriptor.MediaType {
 		case helmTypes.ConfigMediaType:
 			configDescriptor = &descriptor
 			// remove the config descriptor from the list of descriptors
-			layers = append(layers[:k], layers[k+1:]...)
+			layers = append(layers[:i], layers[i+1:]...)
 		case ocispec.MediaTypeImageConfig:
 			configDescriptor = &descriptor
 			// remove the config descriptor from the list of descriptors
-			layers = append(layers[:k], layers[k+1:]...)
+			layers = append(layers[:i], layers[i+1:]...)
+		case distributionSchema.MediaTypeImageConfig:
+			configDescriptor = &descriptor
+			// remove the config descriptor from the list of descriptors
+			layers = append(layers[:i], layers[i+1:]...)
+		case distributionSchema.MediaTypeManifest:
+			// see if we have the manifest in the descriptors list
+			// remove the manifest descriptor from the list of descriptors
+			layers = append(layers[:i], layers[i+1:]...)
 		}
 	}
 
 	if configDescriptor == nil {
-		return nil, fmt.Errorf("could not load config with mediatype %s", ocispec.MediaTypeImageConfig)
+		return nil, fmt.Errorf("could not load config for artifact with manifest: %s", manifest.Digest)
 	}
 
 	result := &PullResult{

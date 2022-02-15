@@ -19,8 +19,11 @@ package controllers
 import (
 	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -338,7 +341,17 @@ func (r *OCIRepositoryReconciler) reconcile(ctx context.Context, repository sour
 	}
 
 	// We expect the tarball to be a single file
-	in := bytes.NewReader(pullResult.Layers[0].Data)
+	if pullResult.Layers == nil || len(pullResult.Layers) == 0 {
+		fmt.Println("Manifest:", pullResult.Manifest.Data)
+		return sourcev1.OCIRepositoryNotReady(repository, sourcev1.OCIRepositoryOperationFailedReason, "no layers found"), nil
+	}
+
+	in, err := uncompressed(pullResult.Layers[0].Data)
+	if err != nil {
+		return sourcev1.OCIRepositoryNotReady(repository, sourcev1.OCIRepositoryOperationFailedReason, err.Error()), err
+	}
+	defer in.Close()
+
 	if err := r.Storage.ArchiveTar(&artifact, tar.NewReader(in), SourceIgnoreFilter(ps, ignoreDomain)); err != nil {
 		err = fmt.Errorf("storage archive error: %w", err)
 		return sourcev1.OCIRepositoryNotReady(repository, sourcev1.StorageOperationFailedReason, err.Error()), err
@@ -493,4 +506,22 @@ func (r *OCIRepositoryReconciler) updateStatus(ctx context.Context, req ctrl.Req
 	repository.Status = newStatus
 
 	return r.Status().Patch(ctx, &repository, patch)
+}
+
+// uncompressed returns the uncompressed artifact.
+func uncompressed(data []byte) (io.ReadCloser, error) {
+	in := bytes.NewReader(data)
+	var uncompressed io.ReadCloser
+	var err error
+	if contentType := http.DetectContentType(data); contentType == "application/x-gzip" {
+		uncompressed, err = gzip.NewReader(in)
+		if err != nil {
+			return nil, err
+		}
+
+		return uncompressed, nil
+	}
+
+	// If the artifact is not compressed, we just return the data as a reader.
+	return io.NopCloser(in), nil
 }
