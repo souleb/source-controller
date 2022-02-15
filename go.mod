@@ -10,6 +10,7 @@ require (
 	github.com/ProtonMail/go-crypto v0.0.0-20210428141323-04723f9f07d7
 	github.com/containerd/containerd v1.5.9
 	github.com/cyphar/filepath-securejoin v0.2.3
+	github.com/distribution/distribution v2.8.0+incompatible
 	github.com/distribution/distribution/v3 v3.0.0-20211118083504-a29a3c99a684
 	github.com/elazarl/goproxy v0.0.0-20211114080932-d06c3be7c11b
 	github.com/fluxcd/pkg/apis/meta v0.10.2
@@ -25,7 +26,6 @@ require (
 	github.com/go-git/go-billy/v5 v5.3.1
 	github.com/go-git/go-git/v5 v5.4.2
 	github.com/go-logr/logr v1.2.2
-	github.com/google/go-containerregistry v0.8.1-0.20220110151055-a61fd0a8e2bb
 	github.com/libgit2/git2go/v31 v31.7.6
 	github.com/minio/minio-go/v7 v7.0.15
 	github.com/onsi/ginkgo v1.16.5
@@ -70,7 +70,6 @@ require (
 	github.com/bugsnag/panicwrap v1.3.4 // indirect
 	github.com/cespare/xxhash/v2 v2.1.2 // indirect
 	github.com/chai2010/gettext-go v0.0.0-20160711120539-c6fed771bfd5 // indirect
-	github.com/containerd/stargz-snapshotter/estargz v0.10.1 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/docker/cli v20.10.12+incompatible // indirect
 	github.com/docker/distribution v2.7.1+incompatible // indirect
@@ -165,7 +164,6 @@ require (
 	github.com/sosedoff/gitkit v0.2.1-0.20200818155723-72ebbcf5056d // indirect
 	github.com/spf13/cast v1.4.1 // indirect
 	github.com/spf13/cobra v1.3.0 // indirect
-	github.com/vbatts/tar-split v0.11.2 // indirect
 	github.com/xanzy/ssh-agent v0.3.0 // indirect
 	github.com/xeipuuv/gojsonpointer v0.0.0-20180127040702-4e3ac2762d5f // indirect
 	github.com/xeipuuv/gojsonreference v0.0.0-20180127040603-bd5ef7bd5415 // indirect

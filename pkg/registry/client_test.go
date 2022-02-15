@@ -7,7 +7,9 @@
 package registry
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -204,8 +206,10 @@ func (suite *RegistryClientTestSuite) Test_1_Push() {
 	_, err = suite.RegistryClient.Push(contents, ocispec.MediaTypeImageConfig, ref)
 	suite.Nil(err, "no error pushing good ref")
 
-	_, err = suite.RegistryClient.Pull(ref)
+	pullResult, err := suite.RegistryClient.Pull(ref)
 	suite.Nil(err, "no error pulling a kustomization archive")
+
+	printresult(pullResult, suite)
 
 }
 
@@ -245,6 +249,63 @@ func (suite *RegistryClientTestSuite) Test_2_Pull() {
 	suite.Equal("{\"name\":\"local-subchart\",\"version\":\"0.1.0\",\"description\":\"A Helm chart for Kubernetes\",\"apiVersion\":\"v1\"}",
 		string(result.Config.Data))
 	suite.Equal(chartData, result.Layers[0].Data)
+
+	// Pull from public registry
+	tag := "1.0.4"
+	ref = fmt.Sprintf("ghcr.io/stefanprodan/kustomizer-demo-app:%s", tag)
+	pullResult, err := suite.RegistryClient.Pull(ref)
+	suite.Nil(err, "error on loading hcr.io/stefanprodan/kustomizer-demo-app:1.0.4")
+	printresult(pullResult, suite)
+
+}
+
+func printresult(pullResult *PullResult, suite *RegistryClientTestSuite) {
+	in := bytes.NewReader(pullResult.Layers[0].Data)
+	var uncompressed io.ReadCloser
+	var err error
+	if contentType := http.DetectContentType(pullResult.Layers[0].Data); contentType == "application/x-gzip" {
+		uncompressed, err = gzip.NewReader(in)
+		suite.Nil(err, "error on unzipping hcr.io/stefanprodan/kustomizer-demo-app:1.0.4")
+		fmt.Println("\nuncompressed!")
+		defer uncompressed.Close()
+	} else {
+		uncompressed = io.NopCloser(in)
+	}
+	tr := tar.NewReader(uncompressed)
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break // End of archive
+		}
+
+		// Ignore anything that is not a file (directories, symlinks)
+		if !header.FileInfo().Mode().IsRegular() {
+			continue
+		}
+
+		// We want to remove any environment specific data as well, this
+		// ensures the checksum is purely content based.
+		header = hashSafe(header)
+
+		// Read the file
+		data, err := ioutil.ReadAll(tr)
+		suite.Nil(err, "no error reading file")
+		fmt.Println(string(data))
+	}
+}
+
+func hashSafe(header *tar.Header) *tar.Header {
+	return &tar.Header{
+		Typeflag:   header.Typeflag,
+		Name:       header.Name,
+		Linkname:   header.Linkname,
+		Size:       header.Size,
+		Mode:       header.Mode,
+		Devmajor:   header.Devmajor,
+		Devminor:   header.Devminor,
+		PAXRecords: header.PAXRecords,
+		Format:     header.Format,
+	}
 }
 
 func (suite *RegistryClientTestSuite) Test_3_Tags() {
