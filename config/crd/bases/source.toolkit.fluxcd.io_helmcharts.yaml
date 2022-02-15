@@ -112,11 +112,12 @@ spec:
                     type: string
                   kind:
                     description: Kind of the referent, valid values are ('HelmRepository',
-                      'GitRepository', 'Bucket').
+                      'GitRepository', 'Bucket', 'OCIRepository').
                     enum:
                     - HelmRepository
                     - GitRepository
                     - Bucket
+                    - OCIRepository
                     type: string
                   name:
                     description: Name of the referent.
