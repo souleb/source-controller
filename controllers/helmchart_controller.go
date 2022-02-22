@@ -17,6 +17,7 @@ limitations under the License.
 package controllers
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -29,6 +30,7 @@ import (
 
 	securejoin "github.com/cyphar/filepath-securejoin"
 	helmgetter "helm.sh/helm/v3/pkg/getter"
+	helmTypes "helm.sh/helm/v3/pkg/registry"
 	corev1 "k8s.io/api/core/v1"
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -57,6 +59,7 @@ import (
 	"github.com/fluxcd/source-controller/internal/helm/chart"
 	"github.com/fluxcd/source-controller/internal/helm/getter"
 	"github.com/fluxcd/source-controller/internal/helm/repository"
+	"github.com/fluxcd/source-controller/pkg/registry"
 )
 
 // +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=helmcharts,verbs=get;list;watch;create;update;patch;delete
@@ -67,6 +70,7 @@ import (
 // HelmChartReconciler reconciles a HelmChart object
 type HelmChartReconciler struct {
 	client.Client
+	RegistryClient        *registry.Client
 	Scheme                *runtime.Scheme
 	Storage               *Storage
 	Getters               helmgetter.Providers
@@ -106,6 +110,11 @@ func (r *HelmChartReconciler) SetupWithManagerAndOptions(mgr ctrl.Manager, opts 
 		Watches(
 			&source.Kind{Type: &sourcev1.Bucket{}},
 			handler.EnqueueRequestsFromMapFunc(r.requestsForBucketChange),
+			builder.WithPredicates(SourceRevisionChangePredicate{}),
+		).
+		Watches(
+			&source.Kind{Type: &sourcev1.OCIRepository{}},
+			handler.EnqueueRequestsFromMapFunc(r.requestsForOCIRepositoryChange),
 			builder.WithPredicates(SourceRevisionChangePredicate{}),
 		).
 		WithOptions(controller.Options{MaxConcurrentReconciles: opts.MaxConcurrentReconciles}).
@@ -225,6 +234,8 @@ func (r *HelmChartReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	case *sourcev1.GitRepository, *sourcev1.Bucket:
 		reconciledChart, reconcileErr = r.fromTarballArtifact(ctx, *typedSource.GetArtifact(), *chart.DeepCopy(),
 			workDir, changed)
+	case *sourcev1.OCIRepository:
+		reconciledChart, reconcileErr = r.fromOCIRepository(ctx, *typedSource, *chart.DeepCopy(), workDir, changed)
 	default:
 		err := fmt.Errorf("unable to reconcile unsupported source reference kind '%s'", chart.Spec.SourceRef.Kind)
 		return ctrl.Result{Requeue: false}, err
@@ -289,6 +300,13 @@ func (r *HelmChartReconciler) getSource(ctx context.Context, chart sourcev1.Helm
 			return source, fmt.Errorf("failed to retrieve source: %w", err)
 		}
 		source = &bucket
+	case sourcev1.OCIRepositoryKind:
+		var ocirepo sourcev1.OCIRepository
+		err := r.Client.Get(ctx, namespacedName, &ocirepo)
+		if err != nil {
+			return source, fmt.Errorf("failed to retrieve source: %w", err)
+		}
+		source = &ocirepo
 	default:
 		return source, fmt.Errorf("source `%s` kind '%s' not supported",
 			chart.Spec.SourceRef.Name, chart.Spec.SourceRef.Kind)
@@ -395,6 +413,60 @@ func (r *HelmChartReconciler) fromHelmRepository(ctx context.Context, repo sourc
 		return sourcev1.HelmChartNotReady(c, sourcev1.StorageOperationFailedReason, err.Error()), err
 	}
 	return sourcev1.HelmChartReady(c, newArtifact, cUrl, sourcev1.ChartPullSucceededReason, b.Summary()), nil
+}
+
+func (r *HelmChartReconciler) fromOCIRepository(ctx context.Context, repo sourcev1.OCIRepository, c sourcev1.HelmChart,
+	workDir string, force bool) (sourcev1.HelmChart, error) {
+
+	res, err := r.RegistryClient.Pull(repo.Status.Artifact.URL)
+	if err != nil {
+		err = fmt.Errorf("failed to pull chart: %w", err)
+		return sourcev1.HelmChartNotReady(c, sourcev1.ChartPullFailedReason, err.Error()), err
+	}
+
+	var chartData []byte
+	for _, layer := range res.Layers {
+		if layer.MediaType == helmTypes.ChartLayerMediaType {
+			chartData = layer.Data
+		}
+	}
+	if chartData == nil {
+		err := fmt.Errorf("Failed to find chart layer in OCI repository")
+		return sourcev1.HelmChartNotReady(c, sourcev1.ChartPullFailedReason, err.Error()), err
+	}
+
+	newArtifact := r.Storage.NewArtifactFor(c.Kind, c.GetObjectMeta(), repo.Status.Artifact.Revision,
+		fmt.Sprintf("%s.tgz", repo.Status.Artifact.Revision))
+
+	// Ensure artifact directory exists
+	err = r.Storage.MkdirAll(newArtifact)
+	if err != nil {
+		err = fmt.Errorf("unable to create chart directory: %w", err)
+		return sourcev1.HelmChartNotReady(c, sourcev1.StorageOperationFailedReason, err.Error()), err
+	}
+
+	// Acquire a lock for the artifact
+	unlock, err := r.Storage.Lock(newArtifact)
+	if err != nil {
+		err = fmt.Errorf("unable to acquire lock: %w", err)
+		return sourcev1.HelmChartNotReady(c, sourcev1.StorageOperationFailedReason, err.Error()), err
+	}
+	defer unlock()
+
+	// Copy the packaged chart to the artifact path
+	if err = r.Storage.Copy(&newArtifact, bytes.NewBuffer(chartData)); err != nil {
+		err = fmt.Errorf("failed to write chart package to storage: %w", err)
+		return sourcev1.HelmChartNotReady(c, sourcev1.StorageOperationFailedReason, err.Error()), err
+	}
+
+	// Update symlink
+	cUrl, err := r.Storage.Symlink(newArtifact, "latest.tgz")
+	if err != nil {
+		err = fmt.Errorf("storage error: %w", err)
+		return sourcev1.HelmChartNotReady(c, sourcev1.StorageOperationFailedReason, err.Error()), err
+	}
+
+	return sourcev1.HelmChartReady(c, newArtifact, cUrl, sourcev1.ChartPullSucceededReason, "chart pulled"), nil
 }
 
 func (r *HelmChartReconciler) fromTarballArtifact(ctx context.Context, source sourcev1.Artifact, c sourcev1.HelmChart,
@@ -781,6 +853,34 @@ func (r *HelmChartReconciler) requestsForGitRepositoryChange(o client.Object) []
 	var list sourcev1.HelmChartList
 	if err := r.List(context.TODO(), &list, client.MatchingFields{
 		sourcev1.SourceIndexKey: fmt.Sprintf("%s/%s", sourcev1.GitRepositoryKind, repo.Name),
+	}); err != nil {
+		return nil
+	}
+
+	// TODO(hidde): unlike other places (e.g. the helm-controller),
+	//  we have no reference here to determine if the request is coming
+	//  from the _old_ or _new_ update event, and resources are thus
+	//  enqueued twice.
+	var reqs []reconcile.Request
+	for _, i := range list.Items {
+		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&i)})
+	}
+	return reqs
+}
+
+func (r *HelmChartReconciler) requestsForOCIRepositoryChange(o client.Object) []reconcile.Request {
+	ociRepo, ok := o.(*sourcev1.OCIRepository)
+	if !ok {
+		panic(fmt.Sprintf("Expected an OCIRepository, got %T", o))
+	}
+
+	if ociRepo.GetArtifact() == nil {
+		return nil
+	}
+
+	var list sourcev1.HelmChartList
+	if err := r.List(context.TODO(), &list, client.MatchingFields{
+		sourcev1.SourceIndexKey: fmt.Sprintf("%s/%s", sourcev1.OCIRepositoryKind, ociRepo.Name),
 	}); err != nil {
 		return nil
 	}
