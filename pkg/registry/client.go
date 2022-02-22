@@ -196,9 +196,35 @@ type PullResult struct {
 }
 
 type descriptorPullSummary struct {
-	Data   []byte `json:"-"`
-	Digest string `json:"digest"`
-	Size   int64  `json:"size"`
+	MediaType string `json:"mediaType"`
+	Data      []byte `json:"-"`
+	Digest    string `json:"digest"`
+	Size      int64  `json:"size"`
+}
+
+func (c *Client) PullManifest(ref string) (ocispec.Descriptor, error) {
+	parsedRef, err := registry.ParseReference(ref)
+	if err != nil {
+		return ocispec.Descriptor{}, err
+	}
+
+	memoryStore := content.NewMemory()
+	allowedMediaTypes := []string{
+		helmTypes.ConfigMediaType,
+		helmTypes.ChartLayerMediaType,
+	}
+
+	registryStore := content.Registry{Resolver: c.resolver}
+
+	manifest, err := oras.Copy(ctx(c.out, c.debug), registryStore, parsedRef.String(), memoryStore, "",
+		oras.WithPullEmptyNameAllowed(),
+		oras.WithAllowedMediaTypes(allowedMediaTypes))
+	if err != nil {
+		return ocispec.Descriptor{}, err
+	}
+
+	return manifest, nil
+
 }
 
 // Pull downloads an artifact from a registry
@@ -263,12 +289,14 @@ func (c *Client) Pull(ref string) (*PullResult, error) {
 
 	result := &PullResult{
 		Manifest: &descriptorPullSummary{
-			Digest: manifest.Digest.String(),
-			Size:   manifest.Size,
+			MediaType: manifest.MediaType,
+			Digest:    manifest.Digest.String(),
+			Size:      manifest.Size,
 		},
 		Config: &descriptorPullSummary{
-			Digest: configDescriptor.Digest.String(),
-			Size:   configDescriptor.Size,
+			MediaType: configDescriptor.MediaType,
+			Digest:    configDescriptor.Digest.String(),
+			Size:      configDescriptor.Size,
 		},
 		Layers: []*descriptorPullSummary{},
 		Ref:    parsedRef.String(),
@@ -298,9 +326,10 @@ func (c *Client) Pull(ref string) (*PullResult, error) {
 			getLayerDescriptorErr = errors.Errorf("Unable to retrieve blob with digest %s", layer.Digest)
 		} else {
 			l := &descriptorPullSummary{
-				Digest: layer.Digest.String(),
-				Size:   layer.Size,
-				Data:   layerData,
+				MediaType: layer.MediaType,
+				Digest:    layer.Digest.String(),
+				Size:      layer.Size,
+				Data:      layerData,
 			}
 
 			result.Layers = append(result.Layers, l)

@@ -17,6 +17,7 @@ limitations under the License.
 package controllers
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -30,6 +31,7 @@ import (
 
 	securejoin "github.com/cyphar/filepath-securejoin"
 	helmgetter "helm.sh/helm/v3/pkg/getter"
+	helmTypes "helm.sh/helm/v3/pkg/registry"
 	corev1 "k8s.io/api/core/v1"
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -151,6 +153,11 @@ func (r *HelmChartReconciler) SetupWithManagerAndOptions(mgr ctrl.Manager, opts 
 		Watches(
 			&source.Kind{Type: &sourcev1.Bucket{}},
 			handler.EnqueueRequestsFromMapFunc(r.requestsForBucketChange),
+			builder.WithPredicates(SourceRevisionChangePredicate{}),
+		).
+		Watches(
+			&source.Kind{Type: &sourcev1.OCIRepository{}},
+			handler.EnqueueRequestsFromMapFunc(r.requestsForOCIRepositoryChange),
 			builder.WithPredicates(SourceRevisionChangePredicate{}),
 		).
 		WithOptions(controller.Options{MaxConcurrentReconciles: opts.MaxConcurrentReconciles}).
@@ -931,6 +938,34 @@ func (r *HelmChartReconciler) requestsForGitRepositoryChange(o client.Object) []
 		if i.Status.ObservedSourceArtifactRevision != repo.GetArtifact().Revision {
 			reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&i)})
 		}
+	}
+	return reqs
+}
+
+func (r *HelmChartReconciler) requestsForOCIRepositoryChange(o client.Object) []reconcile.Request {
+	ociRepo, ok := o.(*sourcev1.OCIRepository)
+	if !ok {
+		panic(fmt.Sprintf("Expected an OCIRepository, got %T", o))
+	}
+
+	if ociRepo.GetArtifact() == nil {
+		return nil
+	}
+
+	var list sourcev1.HelmChartList
+	if err := r.List(context.TODO(), &list, client.MatchingFields{
+		sourcev1.SourceIndexKey: fmt.Sprintf("%s/%s", sourcev1.OCIRepositoryKind, ociRepo.Name),
+	}); err != nil {
+		return nil
+	}
+
+	// TODO(hidde): unlike other places (e.g. the helm-controller),
+	//  we have no reference here to determine if the request is coming
+	//  from the _old_ or _new_ update event, and resources are thus
+	//  enqueued twice.
+	var reqs []reconcile.Request
+	for _, i := range list.Items {
+		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&i)})
 	}
 	return reqs
 }

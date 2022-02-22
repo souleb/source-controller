@@ -295,9 +295,17 @@ func (r *OCIRepositoryReconciler) reconcile(ctx context.Context, repository sour
 
 	isHelm := strings.Contains(repository.Spec.URL, "oci://")
 	if isHelm {
+		manifest, err := r.RegistryClient.PullManifest(ref.String())
+		if err != nil {
+			return sourcev1.OCIRepositoryNotReady(repository, sourcev1.OCIRepositoryOperationFailedReason, err.Error()), err
+		}
+
 		// Helm chart, return ready condition with helm artifact reference
 		message := fmt.Sprintf("Helm Artifact with ref: %s", ref)
-		return sourcev1.OCIRepositoryReady(repository, sourcev1.Artifact{}, ref.String(), sourcev1.OCIRepositoryOperationSucceedReason, message), nil
+		return sourcev1.OCIRepositoryReady(repository, sourcev1.Artifact{
+			URL:      ref.String(),
+			Revision: manifest.Digest.String(),
+		}, ref.String(), sourcev1.OCIRepositoryOperationSucceedReason, message), nil
 	}
 
 	// Pull the image

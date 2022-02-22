@@ -192,6 +192,12 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", sourcev1.HelmRepositoryKind)
 		os.Exit(1)
 	}
+
+	rClient, err := registry.NewClient(registry.ClientOptWriter(os.Stdout))
+	if err != nil {
+		setupLog.Error(err, "unable to create OCI registry client")
+		os.Exit(1)
+	}
 	if err = (&controllers.HelmChartReconciler{
 		Client:         mgr.GetClient(),
 		Storage:        storage,
@@ -218,11 +224,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	rClient, err := registry.NewClient(registry.ClientOptWriter(os.Stdout))
-	if err != nil {
-		setupLog.Error(err, "unable to create OCI registry client")
-		os.Exit(1)
-	}
 	if err = (&controllers.OCIRepositoryReconciler{
 		Client:                mgr.GetClient(),
 		Scheme:                mgr.GetScheme(),

@@ -18,6 +18,7 @@ require (
 	github.com/containerd/containerd v1.5.9
 	github.com/cyphar/filepath-securejoin v0.2.3
 	github.com/darkowlzz/controller-check v0.0.0-20220119215126-648356cef22c
+	github.com/distribution/distribution v2.8.0+incompatible
 	github.com/distribution/distribution/v3 v3.0.0-20211118083504-a29a3c99a684
 	github.com/docker/go-units v0.4.0
 	github.com/elazarl/goproxy v0.0.0-20220115173737-adb46da277ac
