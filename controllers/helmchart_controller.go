@@ -17,7 +17,6 @@ limitations under the License.
 package controllers
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -31,7 +30,6 @@ import (
 
 	securejoin "github.com/cyphar/filepath-securejoin"
 	helmgetter "helm.sh/helm/v3/pkg/getter"
-	helmTypes "helm.sh/helm/v3/pkg/registry"
 	corev1 "k8s.io/api/core/v1"
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
