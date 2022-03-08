@@ -35,6 +35,7 @@ import (
 	"github.com/fluxcd/pkg/testserver"
 
 	sourcev1 "github.com/fluxcd/source-controller/api/v1beta2"
+	"github.com/fluxcd/source-controller/pkg/registry"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -72,6 +73,10 @@ var (
 	tlsCA         []byte
 )
 
+var (
+	testRegistryClient *registry.Client
+)
+
 func init() {
 	rand.Seed(time.Now().UnixNano())
 }
@@ -97,6 +102,11 @@ func TestMain(m *testing.M) {
 	}
 
 	testMetricsH = controller.MustMakeMetrics(testEnv)
+
+	testRegistryClient, err = registry.NewClient(registry.ClientOptWriter(os.Stdout))
+	if err != nil {
+		panic(fmt.Sprintf("Failed to create OCI registry client"))
+	}
 
 	if err := (&GitRepositoryReconciler{
 		Client:        testEnv,
@@ -134,6 +144,24 @@ func TestMain(m *testing.M) {
 		Storage:       testStorage,
 	}).SetupWithManager(testEnv); err != nil {
 		panic(fmt.Sprintf("Failed to start HelmRepositoryReconciler: %v", err))
+	}
+
+	if err = (&OCIRegistryReconciler{
+		Client:        testEnv,
+		EventRecorder: record.NewFakeRecorder(32),
+		Metrics:       testMetricsH,
+	}).SetupWithManager(testEnv); err != nil {
+		panic(fmt.Sprintf("Failed to start OCIRegistryReconciler: %v", err))
+	}
+
+	if err = (&OCIArtifactReconciler{
+		Client:         testEnv,
+		EventRecorder:  record.NewFakeRecorder(32),
+		Metrics:        testMetricsH,
+		Storage:        testStorage,
+		RegistryClient: testRegistryClient,
+	}).SetupWithManager(testEnv); err != nil {
+		panic(fmt.Sprintf("Failed to start OCIArtifactReconciler: %v", err))
 	}
 
 	go func() {

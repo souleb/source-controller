@@ -85,4 +85,10 @@ const (
 
 	// SymlinkUpdateFailedReason signals a failure in updating a symlink.
 	SymlinkUpdateFailedReason string = "SymlinkUpdateFailed"
+	// ValidationFailedReason represents the fact that some part of the spec of a given resource
+	// couldn't be validated.
+	ValidationFailedReason string = "ValidationFailed"
+
+	// InitializedReason represents the fact that a given resource has been initialized.
+	InitializedReason string = "Initialized"
 )

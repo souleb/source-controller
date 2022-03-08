@@ -152,7 +152,7 @@ rules:
 - apiGroups:
   - source.toolkit.fluxcd.io
   resources:
-  - ocirepositories
+  - ociartifacts
   verbs:
   - create
   - delete
@@ -164,7 +164,7 @@ rules:
 - apiGroups:
   - source.toolkit.fluxcd.io
   resources:
-  - ocirepositories/finalizers
+  - ociartifacts/finalizers
   verbs:
   - create
   - delete
@@ -174,7 +174,27 @@ rules:
 - apiGroups:
   - source.toolkit.fluxcd.io
   resources:
-  - ocirepositories/status
+  - ociartifacts/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - source.toolkit.fluxcd.io
+  resources:
+  - ociregistries
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - source.toolkit.fluxcd.io
+  resources:
+  - ociregistries/status
   verbs:
   - get
   - patch

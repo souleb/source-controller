@@ -224,19 +224,29 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&controllers.OCIRepositoryReconciler{
-		Client:                mgr.GetClient(),
-		Scheme:                mgr.GetScheme(),
-		Storage:               storage,
-		EventRecorder:         mgr.GetEventRecorderFor(controllerName),
-		ExternalEventRecorder: eventRecorder,
-		MetricsRecorder:       metricsRecorder,
-		RegistryClient:        rClient,
-	}).SetupWithManagerAndOptions(mgr, controllers.OCIRepositoryReconcilerOptions{
+	if err = (&controllers.OCIRegistryReconciler{
+		Client:        mgr.GetClient(),
+		EventRecorder: eventRecorder,
+		Metrics:       metricsH,
+	}).SetupWithManagerAndOptions(mgr, controllers.OCIRegistryReconcilerOptions{
+		MaxConcurrentReconciles: concurrent,
+	}); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", sourcev1.OCIRegistryKind)
+		os.Exit(1)
+	}
+
+	if err = (&controllers.OCIArtifactReconciler{
+		Client:         mgr.GetClient(),
+		EventRecorder:  eventRecorder,
+		Metrics:        metricsH,
+		Storage:        storage,
+		ControllerName: controllerName,
+		RegistryClient: rClient,
+	}).SetupWithManagerAndOptions(mgr, controllers.OCIArtifactReconcilerOptions{
 		MaxConcurrentReconciles:   concurrent,
 		DependencyRequeueInterval: requeueDependency,
 	}); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", sourcev1.OCIRepositoryKind)
+		setupLog.Error(err, "unable to create controller", "controller", sourcev1.OCIArtifactKind)
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

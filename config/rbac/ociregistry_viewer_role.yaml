@@ -1,13 +1,13 @@
-# permissions for end users to view ocirepositories.
+# permissions for end users to view ociregistries.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: ocirepository-viewer-role
+  name: ociregistry-viewer-role
 rules:
 - apiGroups:
   - source.toolkit.fluxcd.io
   resources:
-  - ocirepositories
+  - ociregistries
   verbs:
   - get
   - list
@@ -15,6 +15,6 @@ rules:
 - apiGroups:
   - source.toolkit.fluxcd.io
   resources:
-  - ocirepositories/status
+  - ociregistries/status
   verbs:
   - get

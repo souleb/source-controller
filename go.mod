@@ -59,7 +59,13 @@ require (
 	sigs.k8s.io/yaml v1.3.0
 )
 
+<<<<<<< HEAD
 // Temporary fork of Helm v3.8.1 with patch applied from
+=======
+require github.com/rivo/uniseg v0.2.0 // indirect
+
+// Temporary fork of Helm v3.8.0 with patch applied from
+>>>>>>> aa17aff (Split OCIRepository into OCIArtifacts and OCIRegistry)
 // https://github.com/helm/helm/pull/10568 to solve
 // https://github.com/fluxcd/source-controller/issues/578.
 // TODO: Remove once Helm version with patch is released.
@@ -90,7 +96,7 @@ require (
 	github.com/Azure/go-ansiterm v0.0.0-20210617225240-d185dfc1b5a1 // indirect
 	github.com/AzureAD/microsoft-authentication-library-for-go v0.4.0 // indirect
 	github.com/BurntSushi/toml v0.4.1 // indirect
-	github.com/MakeNowJust/heredoc v0.0.0-20170808103936-bb23615498cd // indirect
+	github.com/MakeNowJust/heredoc v1.0.0 // indirect
 	github.com/Masterminds/goutils v1.1.1 // indirect
 	github.com/Masterminds/sprig/v3 v3.2.2 // indirect
 	github.com/Masterminds/squirrel v1.5.2 // indirect
@@ -167,7 +173,7 @@ require (
 	github.com/mailru/easyjson v0.7.6 // indirect
 	github.com/mattn/go-colorable v0.1.12 // indirect
 	github.com/mattn/go-isatty v0.0.14 // indirect
-	github.com/mattn/go-runewidth v0.0.9 // indirect
+	github.com/mattn/go-runewidth v0.0.13 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.2-0.20181231171920-c182affec369 // indirect
 	github.com/minio/md5-simd v1.1.0 // indirect
 	github.com/minio/sha256-simd v0.1.1 // indirect

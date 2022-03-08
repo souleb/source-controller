@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Flux authors
+Copyright 2022 The Flux authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -51,16 +51,19 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	oras "oras.land/oras-go/pkg/registry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// ociRepoReadyConditions contains all the conditions information needed
-// for OCIRepository Ready status conditions summary calculation.
-var ociRepoReadyConditions = summarize.Conditions{
+// ociArtifactReadyConditions contains all the conditions information needed
+// for OCIArtifact Ready status conditions summary calculation.
+var ociArtifactReadyConditions = summarize.Conditions{
 	Target: meta.ReadyCondition,
 	Owned: []string{
 		sourcev1.FetchFailedCondition,
@@ -84,15 +87,15 @@ var ociRepoReadyConditions = summarize.Conditions{
 	},
 }
 
-// +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=ocirepositories,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=ocirepositories/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=ocirepositories/finalizers,verbs=get;create;update;patch;delete
+// +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=ociartifacts,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=ociartifacts/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=ociartifacts/finalizers,verbs=get;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch
 
-// OCIRepositoryReconciler reconciles a OCIRepository object
-type OCIRepositoryReconciler struct {
+// OCIArtifactReconciler reconciles a OCIArtifact object
+type OCIArtifactReconciler struct {
 	client.Client
 	kuberecorder.EventRecorder
 	helper.Metrics
@@ -104,50 +107,60 @@ type OCIRepositoryReconciler struct {
 	RegistryClient    *registry.Client
 }
 
-type OCIRepositoryReconcilerOptions struct {
+type OCIArtifactReconcilerOptions struct {
 	MaxConcurrentReconciles   int
 	DependencyRequeueInterval time.Duration
 }
 
-// ociRepoReconcilerFunc is the function type for all the Git repository
+// ociArtifactReconcilerFunc is the function type for all the oci Artifacts
 // reconciler functions.
-type ociRepoReconcilerFunc func(ctx context.Context, repository *sourcev1.OCIRepository, artifact *sourcev1.Artifact, pullResult *registry.PullResult) (sreconcile.Result, error)
+type ociArtifactReconcilerFunc func(ctx context.Context, obj *sourcev1.OCIArtifact, artifact *sourcev1.Artifact, pullResult *registry.PullResult) (sreconcile.Result, error)
 
-func (r *OCIRepositoryReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return r.SetupWithManagerAndOptions(mgr, OCIRepositoryReconcilerOptions{})
+func (r *OCIArtifactReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return r.SetupWithManagerAndOptions(mgr, OCIArtifactReconcilerOptions{})
 }
 
-func (r *OCIRepositoryReconciler) SetupWithManagerAndOptions(mgr ctrl.Manager, opts OCIRepositoryReconcilerOptions) error {
+func (r *OCIArtifactReconciler) SetupWithManagerAndOptions(mgr ctrl.Manager, opts OCIArtifactReconcilerOptions) error {
 	r.requeueDependency = opts.DependencyRequeueInterval
 
+	if err := mgr.GetCache().IndexField(context.TODO(), &sourcev1.OCIRegistry{}, sourcev1.OCIRegistryURLIndexKey,
+		r.indexOCIRegistryByURL); err != nil {
+		return fmt.Errorf("failed setting index fields: %w", err)
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&sourcev1.OCIRepository{}, builder.WithPredicates(
+		For(&sourcev1.OCIArtifact{}, builder.WithPredicates(
 			predicate.Or(predicate.GenerationChangedPredicate{}, predicates.ReconcileRequestedPredicate{}),
 		)).
+		Watches(
+			&source.Kind{Type: &sourcev1.OCIRegistry{}},
+			handler.EnqueueRequestsFromMapFunc(r.requestsForOCIRegistryChange),
+			builder.WithPredicates(SourceRevisionChangePredicate{}),
+		).
 		WithOptions(controller.Options{MaxConcurrentReconciles: opts.MaxConcurrentReconciles}).
 		Complete(r)
 }
 
-func (r *OCIRepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
+func (r *OCIArtifactReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	start := time.Now()
 	log := ctrl.LoggerFrom(ctx)
 
-	repository := &sourcev1.OCIRepository{}
-	if err := r.Get(ctx, req.NamespacedName, repository); err != nil {
+	obj := &sourcev1.OCIArtifact{}
+	if err := r.Get(ctx, req.NamespacedName, obj); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
 	// Record suspended status metric
-	r.RecordSuspend(ctx, repository, repository.Spec.Suspend)
+	r.RecordSuspend(ctx, obj, obj.Spec.Suspend)
 
 	// Return early if the object is suspended
-	if repository.Spec.Suspend {
+	if obj.Spec.Suspend {
 		log.Info("reconciliation is suspended for this object")
 		return ctrl.Result{}, nil
 	}
 
 	// Initialize the patch helper with the current version of the object.
-	patchHelper, err := patch.NewHelper(repository, r.Client)
+	patchHelper, err := patch.NewHelper(obj, r.Client)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -160,7 +173,7 @@ func (r *OCIRepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	defer func() {
 		summarizeHelper := summarize.NewHelper(r.EventRecorder, patchHelper)
 		summarizeOpts := []summarize.Option{
-			summarize.WithConditions(ociRepoReadyConditions),
+			summarize.WithConditions(ociArtifactReadyConditions),
 			summarize.WithReconcileResult(recResult),
 			summarize.WithReconcileError(retErr),
 			summarize.WithIgnoreNotFound(),
@@ -168,46 +181,46 @@ func (r *OCIRepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				summarize.RecordContextualError,
 				summarize.RecordReconcileReq,
 			),
-			summarize.WithResultBuilder(sreconcile.AlwaysRequeueResultBuilder{RequeueAfter: repository.GetInterval().Duration}),
+			summarize.WithResultBuilder(sreconcile.AlwaysRequeueResultBuilder{RequeueAfter: obj.GetRequeueAfter()}),
 			summarize.WithPatchFieldOwner(r.ControllerName),
 		}
-		result, retErr = summarizeHelper.SummarizeAndPatch(ctx, repository, summarizeOpts...)
+		result, retErr = summarizeHelper.SummarizeAndPatch(ctx, obj, summarizeOpts...)
 
 		// Always record readiness and duration metrics
-		r.Metrics.RecordReadiness(ctx, repository)
-		r.Metrics.RecordDuration(ctx, repository, start)
+		r.Metrics.RecordReadiness(ctx, obj)
+		r.Metrics.RecordDuration(ctx, obj, start)
 	}()
 
 	// Add finalizer first if not exist to avoid the race condition
 	// between init and delete
-	if !controllerutil.ContainsFinalizer(repository, sourcev1.SourceFinalizer) {
-		controllerutil.AddFinalizer(repository, sourcev1.SourceFinalizer)
+	if !controllerutil.ContainsFinalizer(obj, sourcev1.SourceFinalizer) {
+		controllerutil.AddFinalizer(obj, sourcev1.SourceFinalizer)
 		recResult = sreconcile.ResultRequeue
 		return
 	}
 
 	// Examine if the object is under deletion
-	if !repository.ObjectMeta.DeletionTimestamp.IsZero() {
-		recResult, retErr = r.reconcileDelete(ctx, repository)
+	if !obj.ObjectMeta.DeletionTimestamp.IsZero() {
+		recResult, retErr = r.reconcileDelete(ctx, obj)
 		return
 	}
 
 	// Reconcile actual object
-	reconcilers := []ociRepoReconcilerFunc{
+	reconcilers := []ociArtifactReconcilerFunc{
 		r.reconcileStorage,
 		r.reconcileSource,
 		r.reconcileArtifact,
 	}
-	recResult, retErr = r.reconcile(ctx, repository, reconcilers)
+	recResult, retErr = r.reconcile(ctx, obj, reconcilers)
 	return
 }
 
-func (r *OCIRepositoryReconciler) reconcile(ctx context.Context, repository *sourcev1.OCIRepository, reconcilers []ociRepoReconcilerFunc) (sreconcile.Result, error) {
-	if repository.Generation != repository.Status.ObservedGeneration {
-		conditions.MarkReconciling(repository, "NewGeneration", "reconciling new object generation (%d)", repository.Generation)
+func (r *OCIArtifactReconciler) reconcile(ctx context.Context, obj *sourcev1.OCIArtifact, reconcilers []ociArtifactReconcilerFunc) (sreconcile.Result, error) {
+	if obj.Generation != obj.Status.ObservedGeneration {
+		conditions.MarkReconciling(obj, "NewGeneration", "reconciling new object generation (%d)", obj.Generation)
 	}
 
-	ociCtx, cancel := context.WithTimeout(ctx, repository.Spec.Timeout.Duration)
+	ociCtx, cancel := context.WithTimeout(ctx, obj.Spec.Timeout.Duration)
 	defer cancel()
 
 	var pullResult registry.PullResult
@@ -217,7 +230,7 @@ func (r *OCIRepositoryReconciler) reconcile(ctx context.Context, repository *sou
 	var res sreconcile.Result
 	var resErr error
 	for _, rec := range reconcilers {
-		recResult, err := rec(ociCtx, repository, &artifact, &pullResult)
+		recResult, err := rec(ociCtx, obj, &artifact, &pullResult)
 		// Exit immediately on ResultRequeue.
 		if recResult == sreconcile.ResultRequeue {
 			return sreconcile.ResultRequeue, nil
@@ -235,93 +248,103 @@ func (r *OCIRepositoryReconciler) reconcile(ctx context.Context, repository *sou
 	return res, resErr
 }
 
-func (r *OCIRepositoryReconciler) reconcileStorage(ctx context.Context,
-	repository *sourcev1.OCIRepository, artifact *sourcev1.Artifact, pullResult *registry.PullResult) (sreconcile.Result, error) {
+func (r *OCIArtifactReconciler) reconcileStorage(ctx context.Context,
+	obj *sourcev1.OCIArtifact, artifact *sourcev1.Artifact, pullResult *registry.PullResult) (sreconcile.Result, error) {
 	// Garbage collect previous advertised artifact(s) from storage
-	_ = r.garbageCollect(ctx, repository)
+	_ = r.garbageCollect(ctx, obj)
 
 	// Determine if the advertised artifact is still in storage
-	if artifact := repository.GetArtifact(); artifact != nil && !r.Storage.ArtifactExist(*artifact) {
-		repository.Status.Artifact = nil
-		repository.Status.URL = ""
+	if artifact := obj.GetArtifact(); artifact != nil && !r.Storage.ArtifactExist(*artifact) {
+		obj.Status.Artifact = nil
+		obj.Status.URL = ""
 	}
 
 	// Record that we do not have an artifact
-	if repository.GetArtifact() == nil {
-		conditions.MarkReconciling(repository, "NoArtifact", "no artifact for resource in storage")
+	if obj.GetArtifact() == nil {
+		conditions.MarkReconciling(obj, "NoArtifact", "no artifact for resource in storage")
 		return sreconcile.ResultSuccess, nil
 	}
 
 	// Always update URLs to ensure hostname is up-to-date
 	// TODO(hidde): we may want to send out an event only if we notice the URL has changed
-	r.Storage.SetArtifactURL(repository.GetArtifact())
-	repository.Status.URL = r.Storage.SetHostname(repository.Status.URL)
+	r.Storage.SetArtifactURL(obj.GetArtifact())
+	obj.Status.URL = r.Storage.SetHostname(obj.Status.URL)
 
 	return sreconcile.ResultSuccess, nil
 }
 
-func (r *OCIRepositoryReconciler) reconcileSource(ctx context.Context,
-	repository *sourcev1.OCIRepository, artifact *sourcev1.Artifact, pullResult *registry.PullResult) (sreconcile.Result, error) {
+func (r *OCIArtifactReconciler) reconcileSource(ctx context.Context,
+	obj *sourcev1.OCIArtifact, artifact *sourcev1.Artifact, pullResult *registry.PullResult) (sreconcile.Result, error) {
 
-	// Login to the registry
-	loginOpt, err := r.credentials(ctx, repository)
+	// Get the registry object
+	registry, err := r.getRegistry(ctx, obj)
 	if err != nil {
 		e := &serror.Event{
-			Err:    err,
-			Reason: sourcev1.AuthenticationFailedReason,
+			Err:    fmt.Errorf("failed to get registry: %w", err),
+			Reason: "SourceUnavailable",
 		}
-		conditions.MarkTrue(repository, sourcev1.FetchFailedCondition, sourcev1.AuthenticationFailedReason, e.Err.Error())
+		conditions.MarkTrue(obj, sourcev1.FetchFailedCondition, "SourceUnavailable", e.Err.Error())
 		// Return error to the world as observed may change
 		return sreconcile.ResultEmpty, e
 	}
 
-	hostRegistry := strings.TrimPrefix(strings.Split(repository.Spec.URL, "/")[0], "https://")
-	hostRegistry = strings.TrimPrefix(hostRegistry, "http://")
-	hostRegistry = strings.TrimPrefix(hostRegistry, "oci://")
+	// Login to the registry
+	loginOpt, err := r.credentials(ctx, registry)
+	if err != nil {
+		e := &serror.Event{
+			Err:    fmt.Errorf("failed to get credentials: %w", err),
+			Reason: sourcev1.AuthenticationFailedReason,
+		}
+		conditions.MarkTrue(obj, sourcev1.FetchFailedCondition, sourcev1.AuthenticationFailedReason, e.Err.Error())
+		// Return error to the world as observed may change
+		return sreconcile.ResultEmpty, e
+	}
+
+	hostRegistry := normalizeURL(registry.Spec.URL)
 
 	if loginOpt != nil {
 		err = r.RegistryClient.Login(hostRegistry, loginOpt)
 		if err != nil {
 			e := &serror.Event{
-				Err:    err,
+				Err:    fmt.Errorf("failed to login to registry: %w", err),
 				Reason: sourcev1.AuthenticationFailedReason,
 			}
-			conditions.MarkTrue(repository, sourcev1.FetchFailedCondition, sourcev1.AuthenticationFailedReason, e.Err.Error())
+			conditions.MarkTrue(obj, sourcev1.FetchFailedCondition, sourcev1.AuthenticationFailedReason, e.Err.Error())
 			// Return error to the world as observed may change
 			return sreconcile.ResultEmpty, e
 		}
 	}
 
-	ref, err := r.reference(repository)
+	ref, err := r.reference(obj, registry.Spec.URL)
 	if err != nil {
 		e := &serror.Event{
 			Err:    err,
-			Reason: sourcev1.OCIRepositoryOperationFailedReason,
+			Reason: sourcev1.OCIArtifactOperationFailedReason,
 		}
-		conditions.MarkTrue(repository, sourcev1.FetchFailedCondition, sourcev1.OCIRepositoryOperationFailedReason, e.Err.Error())
+		conditions.MarkTrue(obj, sourcev1.FetchFailedCondition, sourcev1.OCIArtifactOperationFailedReason, e.Err.Error())
 		// Return error to the world as observed may change
 		return sreconcile.ResultEmpty, e
 	}
 
-	isHelm := strings.Contains(repository.Spec.URL, "oci://")
+	isHelm := strings.Contains(registry.Spec.URL, "oci://")
 	if isHelm {
 		manifest, err := r.RegistryClient.PullManifest(ref.String())
 		if err != nil {
 			e := &serror.Event{
 				Err:    fmt.Errorf("failed to pull the artifact for reference '%s': %w", ref.String(), err),
-				Reason: sourcev1.OCIRepositoryOperationFailedReason,
+				Reason: sourcev1.OCIArtifactOperationFailedReason,
 			}
-			conditions.MarkTrue(repository, sourcev1.FetchFailedCondition, sourcev1.OCIRepositoryOperationFailedReason, e.Err.Error())
+			conditions.MarkTrue(obj, sourcev1.FetchFailedCondition, sourcev1.OCIArtifactOperationFailedReason, e.Err.Error())
 			// Return error to the world as observed may change
 			return sreconcile.ResultEmpty, e
 		}
 
 		// Helm chart, return ready condition with helm artifact reference
-		r.AnnotatedEventf(repository, map[string]string{
+		r.AnnotatedEventf(obj, map[string]string{
 			"revision": manifest.Digest.String(),
 		}, corev1.EventTypeNormal, "NewArtifact", "Helm Artifact with ref: %s", ref)
 
-		repository.Status.Artifact = &sourcev1.Artifact{
+		obj.Status.Artifact = &sourcev1.Artifact{
 			URL:      ref.String(),
 			Revision: manifest.Digest.String(),
 		}
@@ -333,44 +356,43 @@ func (r *OCIRepositoryReconciler) reconcileSource(ctx context.Context,
 	result, err := r.RegistryClient.Pull(ref.String())
 	if err != nil {
 		e := &serror.Event{
-			Err:    fmt.Errorf("failed to pull the artifact for repository '%s': %w", ref.String(), err),
-			Reason: sourcev1.OCIRepositoryOperationFailedReason,
+			Err:    fmt.Errorf("failed to pull the artifact for obj '%s': %w", ref.String(), err),
+			Reason: sourcev1.OCIArtifactOperationFailedReason,
 		}
-		conditions.MarkTrue(repository, sourcev1.FetchFailedCondition, sourcev1.OCIRepositoryOperationFailedReason, e.Err.Error())
+		conditions.MarkTrue(obj, sourcev1.FetchFailedCondition, sourcev1.OCIArtifactOperationFailedReason, e.Err.Error())
 		// Return error to the world as observed may change
 		return sreconcile.ResultEmpty, e
 	}
 
-	pullResult = result
-
+	*pullResult = *result
 	revision := fmt.Sprintf("%s@%s", fmt.Sprintf("%s/%s", ref.Registry, ref.Repository), pullResult.Manifest.Digest)
 
 	// Mark observations about the revision on the object.
-	if !repository.GetArtifact().HasRevision(revision) {
+	if !obj.GetArtifact().HasRevision(revision) {
 		message := fmt.Sprintf("new artifact revision '%s'", revision)
-		conditions.MarkTrue(repository, sourcev1.ArtifactOutdatedCondition, "NewRevision", message)
-		conditions.MarkReconciling(repository, "NewRevision", message)
+		conditions.MarkTrue(obj, sourcev1.ArtifactOutdatedCondition, "NewRevision", message)
+		conditions.MarkReconciling(obj, "NewRevision", message)
 	}
 
-	conditions.Delete(repository, sourcev1.FetchFailedCondition)
+	conditions.Delete(obj, sourcev1.FetchFailedCondition)
 
-	*artifact = r.Storage.NewArtifactFor(repository.Kind, repository.GetObjectMeta(), revision, fmt.Sprintf("%s.tar.gz", pullResult.Manifest.Digest))
+	*artifact = r.Storage.NewArtifactFor(obj.Kind, obj.GetObjectMeta(), revision, fmt.Sprintf("%s.tar.gz", pullResult.Manifest.Digest))
 
 	return sreconcile.ResultSuccess, nil
 }
 
-func (r *OCIRepositoryReconciler) reconcileArtifact(ctx context.Context,
-	repository *sourcev1.OCIRepository, artifact *sourcev1.Artifact, pullResult *registry.PullResult) (sreconcile.Result, error) {
+func (r *OCIArtifactReconciler) reconcileArtifact(ctx context.Context,
+	obj *sourcev1.OCIArtifact, artifact *sourcev1.Artifact, pullResult *registry.PullResult) (sreconcile.Result, error) {
 	// Always restore the Ready condition in case it got removed due to a transient error.
 	defer func() {
-		if repository.GetArtifact().HasRevision(artifact.Revision) {
-			conditions.Delete(repository, sourcev1.ArtifactOutdatedCondition)
-			conditions.MarkTrue(repository, meta.ReadyCondition, meta.SucceededReason,
+		if obj.GetArtifact().HasRevision(artifact.Revision) {
+			conditions.Delete(obj, sourcev1.ArtifactOutdatedCondition)
+			conditions.MarkTrue(obj, meta.ReadyCondition, meta.SucceededReason,
 				"stored artifact for revision '%s'", artifact.Revision)
 		}
 	}()
 
-	if repository.GetArtifact().HasRevision(artifact.Revision) {
+	if obj.GetArtifact().HasRevision(artifact.Revision) {
 		ctrl.LoggerFrom(ctx).Info("artifact up-to-date", "revision", artifact.Revision)
 		return sreconcile.ResultSuccess, nil
 	}
@@ -396,14 +418,14 @@ func (r *OCIRepositoryReconciler) reconcileArtifact(ctx context.Context,
 	// archive artifact and check integrity
 	var ignoreDomain []string
 	var ps []gitignore.Pattern
-	if repository.Spec.Ignore != nil {
-		ps = append(ps, sourceignore.ReadPatterns(strings.NewReader(*repository.Spec.Ignore), ignoreDomain)...)
+	if obj.Spec.Ignore != nil {
+		ps = append(ps, sourceignore.ReadPatterns(strings.NewReader(*obj.Spec.Ignore), ignoreDomain)...)
 	}
 
 	// We expect the tarball to be a single file
 	if pullResult.Layers == nil || len(pullResult.Layers) == 0 {
 		return sreconcile.ResultEmpty, &serror.Event{
-			Err:    fmt.Errorf("wrong number of layers in the manifest"),
+			Err:    fmt.Errorf("no layers found in the pulled artifact"),
 			Reason: meta.FailedReason,
 		}
 	}
@@ -424,52 +446,52 @@ func (r *OCIRepositoryReconciler) reconcileArtifact(ctx context.Context,
 			Reason: sourcev1.StorageOperationFailedReason,
 		}
 	}
-	r.AnnotatedEventf(repository, map[string]string{
+	r.AnnotatedEventf(obj, map[string]string{
 		"revision": artifact.Revision,
 		"checksum": artifact.Checksum,
-	}, corev1.EventTypeNormal, "NewArtifact", "fetched artifact with digest %s from '%s'", pullResult.Manifest.Digest[:12], repository.Spec.URL)
+	}, corev1.EventTypeNormal, "NewArtifact", "fetched artifact with ref %s", pullResult.Ref)
 
 	// Record it on the object
-	repository.Status.Artifact = artifact.DeepCopy()
+	obj.Status.Artifact = artifact.DeepCopy()
 
 	// update latest symlink
 	url, err := r.Storage.Symlink(*artifact, "latest.tar.gz")
 	if err != nil {
-		r.eventLogf(ctx, repository, corev1.EventTypeWarning, sourcev1.StorageOperationFailedReason,
+		r.eventLogf(ctx, obj, corev1.EventTypeWarning, sourcev1.StorageOperationFailedReason,
 			"failed to update status URL symlink: %s", err)
 	}
 
 	if url != "" {
-		repository.Status.URL = url
+		obj.Status.URL = url
 	}
 	return sreconcile.ResultSuccess, nil
 }
 
-// garbageCollect performs a garbage collection for the given v1beta1.OCIRepository.
+// garbageCollect performs a garbage collection for the given v1beta1.OCIArtifact.
 // It removes all but the current artifact except for when the
 // deletion timestamp is set, which will result in the removal of
 // all artifacts for the resource.
-func (r *OCIRepositoryReconciler) garbageCollect(ctx context.Context, repository *sourcev1.OCIRepository) error {
-	if !repository.DeletionTimestamp.IsZero() {
-		if deleted, err := r.Storage.RemoveAll(r.Storage.NewArtifactFor(repository.Kind, repository.GetObjectMeta(), "", "*")); err != nil {
+func (r *OCIArtifactReconciler) garbageCollect(ctx context.Context, obj *sourcev1.OCIArtifact) error {
+	if !obj.DeletionTimestamp.IsZero() {
+		if deleted, err := r.Storage.RemoveAll(r.Storage.NewArtifactFor(obj.Kind, obj.GetObjectMeta(), "", "*")); err != nil {
 			return &serror.Event{
 				Err:    fmt.Errorf("garbage collection for deleted resource failed: %w", err),
 				Reason: "GarbageCollectionFailed",
 			}
 		} else if deleted != "" {
-			r.eventLogf(ctx, repository, events.EventTypeTrace, "GarbageCollectionSucceeded",
+			r.eventLogf(ctx, obj, events.EventTypeTrace, "GarbageCollectionSucceeded",
 				"garbage collected artifacts for deleted resource")
 		}
-		repository.Status.Artifact = nil
+		obj.Status.Artifact = nil
 		return nil
 	}
-	if repository.GetArtifact() != nil {
-		if deleted, err := r.Storage.RemoveAllButCurrent(*repository.GetArtifact()); err != nil {
+	if obj.GetArtifact() != nil {
+		if deleted, err := r.Storage.RemoveAllButCurrent(*obj.GetArtifact()); err != nil {
 			return &serror.Event{
 				Err: fmt.Errorf("garbage collection of old artifacts failed: %w", err),
 			}
 		} else if len(deleted) > 0 {
-			r.eventLogf(ctx, repository, events.EventTypeTrace, "GarbageCollectionSucceeded",
+			r.eventLogf(ctx, obj, events.EventTypeTrace, "GarbageCollectionSucceeded",
 				"garbage collected old artifacts")
 		}
 	}
@@ -477,8 +499,8 @@ func (r *OCIRepositoryReconciler) garbageCollect(ctx context.Context, repository
 }
 
 // credentials retrieves the credentials from Authentication
-func (r *OCIRepositoryReconciler) credentials(ctx context.Context, repository *sourcev1.OCIRepository) (registry.LoginOption, error) {
-	auth := repository.Spec.Authentication
+func (r *OCIArtifactReconciler) credentials(ctx context.Context, obj *sourcev1.OCIRegistry) (registry.LoginOption, error) {
+	auth := obj.Spec.Authentication
 	if auth == nil {
 		return nil, nil
 	}
@@ -489,24 +511,22 @@ func (r *OCIRepositoryReconciler) credentials(ctx context.Context, repository *s
 	}
 
 	// lookup service account
-	serviceAccountName := auth.ServiceAccountName
-	if serviceAccountName == "" {
-		serviceAccountName = "default"
-	}
-	serviceAccount := corev1.ServiceAccount{}
-	err := r.Get(ctx, types.NamespacedName{Namespace: repository.Namespace, Name: serviceAccountName}, &serviceAccount)
-	if err != nil {
-		return nil, err
-	}
-	for _, ips := range serviceAccount.ImagePullSecrets {
-		pullSecretNames.Insert(ips.Name)
+	if auth.ServiceAccountName != "" {
+		serviceAccount := corev1.ServiceAccount{}
+		err := r.Get(ctx, types.NamespacedName{Namespace: obj.Namespace, Name: auth.ServiceAccountName}, &serviceAccount)
+		if err != nil {
+			return nil, err
+		}
+		for _, ips := range serviceAccount.ImagePullSecrets {
+			pullSecretNames.Insert(ips.Name)
+		}
 	}
 
 	// lookup image pull secrets
 
 	for _, imagePullSecretName := range pullSecretNames.List() {
 		imagePullSecret := corev1.Secret{}
-		err := r.Get(ctx, types.NamespacedName{Namespace: repository.Namespace, Name: imagePullSecretName}, &imagePullSecret)
+		err := r.Get(ctx, types.NamespacedName{Namespace: obj.Namespace, Name: imagePullSecretName}, &imagePullSecret)
 		if err != nil {
 			return nil, err
 		}
@@ -521,24 +541,24 @@ func (r *OCIRepositoryReconciler) credentials(ctx context.Context, repository *s
 	return nil, fmt.Errorf("no credentials found")
 }
 
-func (r *OCIRepositoryReconciler) reconcileDelete(ctx context.Context, repository *sourcev1.OCIRepository) (sreconcile.Result, error) {
+func (r *OCIArtifactReconciler) reconcileDelete(ctx context.Context, obj *sourcev1.OCIArtifact) (sreconcile.Result, error) {
 	// Garbage collect the resource's artifacts
-	if err := r.garbageCollect(ctx, repository); err != nil {
+	if err := r.garbageCollect(ctx, obj); err != nil {
 		// Return the error so we retry the failed garbage collection
 		return sreconcile.ResultEmpty, err
 	}
 
 	// Remove our finalizer from the list
-	controllerutil.RemoveFinalizer(repository, sourcev1.SourceFinalizer)
+	controllerutil.RemoveFinalizer(obj, sourcev1.SourceFinalizer)
 
 	// Stop reconciliation as the object is being deleted
 	return sreconcile.ResultEmpty, nil
 }
 
-func (r *OCIRepositoryReconciler) reference(repository *sourcev1.OCIRepository) (oras.Reference, error) {
-	url := strings.TrimPrefix(repository.Spec.URL, fmt.Sprintf("%s://", "oci"))
+func (r *OCIArtifactReconciler) reference(obj *sourcev1.OCIArtifact, specURL string) (oras.Reference, error) {
+	url := strings.TrimPrefix(specURL, fmt.Sprintf("%s://", "oci"))
 
-	ref := repository.Spec.Reference
+	ref := obj.Spec.Reference
 	if ref == nil {
 		return oras.ParseReference(fmt.Sprintf("%s:latest", url))
 	}
@@ -588,16 +608,16 @@ func (r *OCIRepositoryReconciler) reference(repository *sourcev1.OCIRepository) 
 	return oras.ParseReference(fmt.Sprintf("%s:latest", url))
 }
 
-func (r *OCIRepositoryReconciler) updateStatus(ctx context.Context, req ctrl.Request, newStatus sourcev1.OCIRepositoryStatus) error {
-	var repository sourcev1.OCIRepository
-	if err := r.Get(ctx, req.NamespacedName, &repository); err != nil {
+func (r *OCIArtifactReconciler) updateStatus(ctx context.Context, req ctrl.Request, newStatus sourcev1.OCIArtifactStatus) error {
+	var obj sourcev1.OCIArtifact
+	if err := r.Get(ctx, req.NamespacedName, &obj); err != nil {
 		return err
 	}
 
-	patch := client.MergeFrom(repository.DeepCopy())
-	repository.Status = newStatus
+	patch := client.MergeFrom(obj.DeepCopy())
+	obj.Status = newStatus
 
-	return r.Status().Patch(ctx, &repository, patch)
+	return r.Status().Patch(ctx, &obj, patch)
 }
 
 // uncompressed returns the uncompressed artifact.
@@ -621,7 +641,7 @@ func uncompressed(data []byte) (io.ReadCloser, error) {
 // eventLog records event and logs at the same time. This log is different from
 // the debug log in the event recorder in the sense that this is a simple log,
 // the event recorder debug log contains complete details about the event.
-func (r *OCIRepositoryReconciler) eventLogf(ctx context.Context, obj runtime.Object, eventType string, reason string, messageFmt string, args ...interface{}) {
+func (r *OCIArtifactReconciler) eventLogf(ctx context.Context, obj runtime.Object, eventType string, reason string, messageFmt string, args ...interface{}) {
 	msg := fmt.Sprintf(messageFmt, args...)
 	// Log and emit event.
 	if eventType == corev1.EventTypeWarning {
@@ -630,4 +650,61 @@ func (r *OCIRepositoryReconciler) eventLogf(ctx context.Context, obj runtime.Obj
 		ctrl.LoggerFrom(ctx).Info(msg)
 	}
 	r.Eventf(obj, eventType, reason, msg)
+}
+
+func (r *OCIArtifactReconciler) indexOCIRegistryByURL(o client.Object) []string {
+	reg, ok := o.(*sourcev1.OCIRegistry)
+	if !ok {
+		panic(fmt.Sprintf("Expected an OCIRegistry, got %T", o))
+	}
+	u := normalizeURL(reg.Spec.URL)
+	if u != "" {
+		return []string{u}
+	}
+	return nil
+}
+
+func (r *OCIArtifactReconciler) requestsForOCIRegistryChange(o client.Object) []reconcile.Request {
+	reg, ok := o.(*sourcev1.OCIRegistry)
+	if !ok {
+		panic(fmt.Sprintf("Expected an OCIRegistry, got %T", o))
+	}
+
+	ctx := context.Background()
+	var list sourcev1.OCIArtifactList
+	if err := r.List(ctx, &list, client.MatchingFields{
+		sourcev1.SourceIndexKey: fmt.Sprintf("%s/%s", sourcev1.OCIRegistryKind, reg.Name),
+	}); err != nil {
+		return nil
+	}
+
+	var reqs []reconcile.Request
+	for _, i := range list.Items {
+		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&i)})
+	}
+	return reqs
+}
+
+func normalizeURL(url string) string {
+	u := strings.TrimPrefix(strings.Split(url, "/")[0], "https://")
+	u = strings.TrimPrefix(u, "http://")
+	u = strings.TrimPrefix(u, "oci://")
+	return u
+}
+
+// getRegistry returns the v1beta2.OCIRegistry for the given object, or an error describing why the registry could not be
+// returned.
+func (r *OCIArtifactReconciler) getRegistry(ctx context.Context, obj *sourcev1.OCIArtifact) (*sourcev1.OCIRegistry, error) {
+	namespacedName := types.NamespacedName{
+		Namespace: obj.GetNamespace(),
+		Name:      obj.Spec.OCIRegistryRef.Name,
+	}
+
+	var registry sourcev1.OCIRegistry
+	if err := r.Client.Get(ctx, namespacedName, &registry); err != nil {
+		fmt.Printf("error getting registry %s: %v\n", namespacedName.String(), err)
+		return nil, err
+	}
+
+	return &registry, nil
 }

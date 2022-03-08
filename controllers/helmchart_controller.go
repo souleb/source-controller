@@ -153,11 +153,11 @@ func (r *HelmChartReconciler) SetupWithManagerAndOptions(mgr ctrl.Manager, opts 
 			handler.EnqueueRequestsFromMapFunc(r.requestsForBucketChange),
 			builder.WithPredicates(SourceRevisionChangePredicate{}),
 		).
-		Watches(
-			&source.Kind{Type: &sourcev1.OCIRepository{}},
-			handler.EnqueueRequestsFromMapFunc(r.requestsForOCIRepositoryChange),
-			builder.WithPredicates(SourceRevisionChangePredicate{}),
-		).
+		// Watches(
+		// 	&source.Kind{Type: &sourcev1.OCIRegistry{}},
+		// 	handler.EnqueueRequestsFromMapFunc(r.requestsForOCIRepositoryChange),
+		// 	builder.WithPredicates(SourceRevisionChangePredicate{}),
+		// ).
 		WithOptions(controller.Options{MaxConcurrentReconciles: opts.MaxConcurrentReconciles}).
 		Complete(r)
 }
@@ -940,33 +940,33 @@ func (r *HelmChartReconciler) requestsForGitRepositoryChange(o client.Object) []
 	return reqs
 }
 
-func (r *HelmChartReconciler) requestsForOCIRepositoryChange(o client.Object) []reconcile.Request {
-	ociRepo, ok := o.(*sourcev1.OCIRepository)
-	if !ok {
-		panic(fmt.Sprintf("Expected an OCIRepository, got %T", o))
-	}
+// func (r *HelmChartReconciler) requestsForOCIRepositoryChange(o client.Object) []reconcile.Request {
+// 	ociRepo, ok := o.(*sourcev1.OCIRepository)
+// 	if !ok {
+// 		panic(fmt.Sprintf("Expected an OCIRepository, got %T", o))
+// 	}
 
-	if ociRepo.GetArtifact() == nil {
-		return nil
-	}
+// 	if ociRepo.GetArtifact() == nil {
+// 		return nil
+// 	}
 
-	var list sourcev1.HelmChartList
-	if err := r.List(context.TODO(), &list, client.MatchingFields{
-		sourcev1.SourceIndexKey: fmt.Sprintf("%s/%s", sourcev1.OCIRepositoryKind, ociRepo.Name),
-	}); err != nil {
-		return nil
-	}
+// 	var list sourcev1.HelmChartList
+// 	if err := r.List(context.TODO(), &list, client.MatchingFields{
+// 		sourcev1.SourceIndexKey: fmt.Sprintf("%s/%s", sourcev1.OCIRepositoryKind, ociRepo.Name),
+// 	}); err != nil {
+// 		return nil
+// 	}
 
-	// TODO(hidde): unlike other places (e.g. the helm-controller),
-	//  we have no reference here to determine if the request is coming
-	//  from the _old_ or _new_ update event, and resources are thus
-	//  enqueued twice.
-	var reqs []reconcile.Request
-	for _, i := range list.Items {
-		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&i)})
-	}
-	return reqs
-}
+// 	// TODO(hidde): unlike other places (e.g. the helm-controller),
+// 	//  we have no reference here to determine if the request is coming
+// 	//  from the _old_ or _new_ update event, and resources are thus
+// 	//  enqueued twice.
+// 	var reqs []reconcile.Request
+// 	for _, i := range list.Items {
+// 		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&i)})
+// 	}
+// 	return reqs
+// }
 
 func (r *HelmChartReconciler) requestsForBucketChange(o client.Object) []reconcile.Request {
 	bucket, ok := o.(*sourcev1.Bucket)
