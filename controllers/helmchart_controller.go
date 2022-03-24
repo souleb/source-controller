@@ -62,6 +62,9 @@ import (
 	sreconcile "github.com/fluxcd/source-controller/internal/reconcile"
 	"github.com/fluxcd/source-controller/internal/reconcile/summarize"
 	"github.com/fluxcd/source-controller/internal/util"
+
+	chartregistry "github.com/fluxcd/source-controller/internal/helm/registry"
+	reg "github.com/fluxcd/source-controller/pkg/registry"
 )
 
 // helmChartReadyCondition contains all the conditions information
@@ -109,6 +112,7 @@ type HelmChartReconciler struct {
 	Storage        *Storage
 	Getters        helmgetter.Providers
 	ControllerName string
+	RegistryClient *reg.Client
 }
 
 func (r *HelmChartReconciler) SetupWithManager(mgr ctrl.Manager) error {
@@ -375,6 +379,8 @@ func (r *HelmChartReconciler) reconcileSource(ctx context.Context, obj *sourcev1
 		return r.buildFromHelmRepository(ctx, obj, typedSource, build)
 	case *sourcev1.GitRepository, *sourcev1.Bucket:
 		return r.buildFromTarballArtifact(ctx, obj, *typedSource.GetArtifact(), build)
+	case *sourcev1.OCIRegistry:
+		return r.buildFromOCIRegistry(ctx, obj, typedSource, build)
 	default:
 		// Ending up here should generally not be possible
 		// as getSource already validates
@@ -481,6 +487,132 @@ func (r *HelmChartReconciler) buildFromHelmRepository(ctx context.Context, obj *
 
 	*b = *build
 	return sreconcile.ResultSuccess, nil
+}
+
+// buildFromOCIRegistry attempts to pull and/or package a Helm chart with
+// the specified data from the v1beta2.HelmChart object and the given
+// v1beta2.Artifact.
+// In case of a failure it records v1beta2.FetchFailedCondition on the chart
+// object, and returns early.
+func (r *HelmChartReconciler) buildFromOCIRegistry(ctx context.Context, obj *sourcev1.HelmChart,
+	registry *sourcev1.OCIRegistry, b *chart.Build) (sreconcile.Result, error) {
+
+	username, password, err := getRegistryCredentials(ctx, r.Client, registry)
+	if err != nil {
+		e := &serror.Event{
+			Err:    fmt.Errorf("failed to get registry credentials: %w", err),
+			Reason: sourcev1.AuthenticationFailedReason,
+		}
+		conditions.MarkTrue(obj, sourcev1.FetchFailedCondition, e.Reason, e.Err.Error())
+		// Return error as the world as observed may change
+		return sreconcile.ResultEmpty, e
+	}
+
+	if username == "" || password != "" {
+		e := &serror.Event{
+			Err:    fmt.Errorf("invalid registry credentials"),
+			Reason: sourcev1.AuthenticationFailedReason,
+		}
+		conditions.MarkTrue(obj, sourcev1.FetchFailedCondition, e.Reason, e.Err.Error())
+		// Return error as the world as observed may change
+		return sreconcile.ResultEmpty, e
+	}
+
+	// 	// get the tls config from the registry
+	// 	var secret *corev1.Secret
+	// 	err := r.Client.Get(ctx, types.NamespacedName{Name: registry.Spec.CertSecretRef.Name, Namespace: registry.Namespace}, secret)
+	// 	if err != nil {
+	// 		e := &serror.Event{
+	// 			Err:    fmt.Errorf("failed to get secret: %w", err),
+	// 			Reason: sourcev1.AuthenticationFailedReason,
+	// 		}
+	// 		conditions.MarkTrue(obj, sourcev1.FetchFailedCondition, e.Reason, e.Err.Error())
+	// 		// Return error as the world as observed may change
+	// 		return sreconcile.ResultEmpty, e
+	// 	}
+
+	// 	tlsConfig, err = getter.TLSClientConfigFromSecret(*secret, registry.Spec.URL)
+	// 	if err != nil {
+	// 		e := &serror.Event{
+	// 			Err:    fmt.Errorf("failed to create TLS client config with secret data: %w", err),
+	// 			Reason: sourcev1.AuthenticationFailedReason,
+	// 		}
+	// 		conditions.MarkTrue(obj, sourcev1.FetchFailedCondition, e.Reason, e.Err.Error())
+	// 		// Requeue as content of secret might change
+	// 		return sreconcile.ResultEmpty, e
+	// 	}
+
+	// }
+
+	regURL := registry.Spec.URL
+	if !strings.Contains(regURL, chartregistry.OCIScheme) {
+		regURL = fmt.Sprintf("%s://%s", chartregistry.OCIScheme, regURL)
+	}
+
+	u, err := url.Parse(regURL)
+	if err != nil {
+		e := &serror.Event{
+			Err:    fmt.Errorf("failed to parse registry URL: %w", err),
+			Reason: sourcev1.AuthenticationFailedReason,
+		}
+		conditions.MarkTrue(obj, sourcev1.FetchFailedCondition, e.Reason, e.Err.Error())
+		// Return error as the world as observed may change
+		return sreconcile.ResultEmpty, e
+	}
+
+	ns := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")[0]
+	hostURL := fmt.Sprintf("%s://%s/%s", u.Scheme, u.Host, ns)
+	logtOpt := reg.LoginOptBasicAuth(username, password)
+
+	// Initialize the chart registry
+	chartReg, err := chartregistry.NewChartRegistry(hostURL, r.RegistryClient, logtOpt)
+	if err != nil {
+		// Any error requires a change in generation,
+		// which we should be informed about by the watcher
+		switch err.(type) {
+		case *url.Error:
+			e := &serror.Stalling{
+				Err:    fmt.Errorf("invalid Helm registry URL: %w", err),
+				Reason: sourcev1.URLInvalidReason,
+			}
+			conditions.MarkTrue(obj, sourcev1.FetchFailedCondition, e.Reason, e.Err.Error())
+			return sreconcile.ResultEmpty, e
+		default:
+			e := &serror.Stalling{
+				Err:    fmt.Errorf("failed to construct Helm client: %w", err),
+				Reason: meta.FailedReason,
+			}
+			conditions.MarkTrue(obj, sourcev1.FetchFailedCondition, e.Reason, e.Err.Error())
+			return sreconcile.ResultEmpty, e
+		}
+	}
+
+	// Construct the chart builder with scoped configuration
+	cb := chart.NewRemoteBuilder(chartReg)
+	opts := chart.BuildOptions{
+		ValuesFiles: obj.GetValuesFiles(),
+		Force:       obj.Generation != obj.Status.ObservedGeneration,
+	}
+	if artifact := obj.GetArtifact(); artifact != nil {
+		opts.CachedChart = r.Storage.LocalPath(*artifact)
+	}
+
+	// Set the VersionMetadata to the object's Generation if ValuesFiles is defined
+	// This ensures changes can be noticed by the Artifact consumer
+	if len(opts.GetValuesFiles()) > 0 {
+		opts.VersionMetadata = strconv.FormatInt(obj.Generation, 10)
+	}
+
+	// Build the chart
+	ref := chart.RemoteReference{Name: obj.Spec.Chart, Version: obj.Spec.Version}
+	build, err := cb.Build(ctx, ref, util.TempPathForObj("", ".tgz", obj), opts)
+	if err != nil {
+		return sreconcile.ResultEmpty, err
+	}
+
+	*b = *build
+	return sreconcile.ResultSuccess, nil
+
 }
 
 // buildFromTarballArtifact attempts to pull and/or package a Helm chart with

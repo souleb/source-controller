@@ -189,13 +189,13 @@ func (c *Client) Logout(host string, opts ...LogoutOption) error {
 
 // PullResult is the result returned upon successful pull.
 type PullResult struct {
-	Manifest *descriptorPullSummary   `json:"manifest"`
-	Config   *descriptorPullSummary   `json:"config"`
-	Layers   []*descriptorPullSummary `json:"layers"`
-	Ref      string                   `json:"ref"`
+	Manifest *DescriptoPullSummary   `json:"manifest"`
+	Config   *DescriptoPullSummary   `json:"config"`
+	Layers   []*DescriptoPullSummary `json:"layers"`
+	Ref      string                  `json:"ref"`
 }
 
-type descriptorPullSummary struct {
+type DescriptoPullSummary struct {
 	MediaType string `json:"mediaType"`
 	Data      []byte `json:"-"`
 	Digest    string `json:"digest"`
@@ -288,17 +288,17 @@ func (c *Client) Pull(ref string) (*PullResult, error) {
 	}
 
 	result := &PullResult{
-		Manifest: &descriptorPullSummary{
+		Manifest: &DescriptoPullSummary{
 			MediaType: manifest.MediaType,
 			Digest:    manifest.Digest.String(),
 			Size:      manifest.Size,
 		},
-		Config: &descriptorPullSummary{
+		Config: &DescriptoPullSummary{
 			MediaType: configDescriptor.MediaType,
 			Digest:    configDescriptor.Digest.String(),
 			Size:      configDescriptor.Size,
 		},
-		Layers: []*descriptorPullSummary{},
+		Layers: []*DescriptoPullSummary{},
 		Ref:    parsedRef.String(),
 	}
 	var getManifestErr error
@@ -325,7 +325,7 @@ func (c *Client) Pull(ref string) (*PullResult, error) {
 		if _, layerData, ok := memoryStore.Get(layer); !ok {
 			getLayerDescriptorErr = errors.Errorf("Unable to retrieve blob with digest %s", layer.Digest)
 		} else {
-			l := &descriptorPullSummary{
+			l := &DescriptoPullSummary{
 				MediaType: layer.MediaType,
 				Digest:    layer.Digest.String(),
 				Size:      layer.Size,

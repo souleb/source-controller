@@ -17,6 +17,8 @@ limitations under the License.
 package v1beta2
 
 import (
+	"time"
+
 	"github.com/fluxcd/pkg/apis/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -90,6 +92,20 @@ func (in *OCIRegistry) GetConditions() []metav1.Condition {
 // SetConditions sets the status conditions on the object.
 func (in *OCIRegistry) SetConditions(conditions []metav1.Condition) {
 	in.Status.Conditions = conditions
+}
+
+// GetRequeueAfter returns the duration after which the source must be
+// reconciled again.
+func (in OCIRegistry) GetRequeueAfter() time.Duration {
+	// We need to implement this method to satisfy the ArtifactSource interface
+	return 0
+}
+
+// GetArtifact returns the latest artifact from the source if present in the
+// status sub-resource.
+func (in *OCIRegistry) GetArtifact() *Artifact {
+	// We need to implement this method to satisfy the ArtifactSource interface
+	return nil
 }
 
 // +genclient

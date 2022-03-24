@@ -59,13 +59,7 @@ require (
 	sigs.k8s.io/yaml v1.3.0
 )
 
-<<<<<<< HEAD
 // Temporary fork of Helm v3.8.1 with patch applied from
-=======
-require github.com/rivo/uniseg v0.2.0 // indirect
-
-// Temporary fork of Helm v3.8.0 with patch applied from
->>>>>>> aa17aff (Split OCIRepository into OCIArtifacts and OCIRegistry)
 // https://github.com/helm/helm/pull/10568 to solve
 // https://github.com/fluxcd/source-controller/issues/578.
 // TODO: Remove once Helm version with patch is released.
@@ -87,6 +81,14 @@ replace github.com/opencontainers/image-spec => github.com/opencontainers/image-
 // Fix CVE-2022-23648
 // Fix CVE-2021-43816
 replace github.com/containerd/containerd => github.com/containerd/containerd v1.6.1
+
+require (
+	github.com/Masterminds/semver v1.5.0
+	github.com/opencontainers/image-spec v1.0.2
+	github.com/stretchr/testify v1.7.1
+	helm.sh/helm v2.17.0+incompatible
+	oras.land/oras-go v1.1.0
+)
 
 require (
 	cloud.google.com/go v0.100.2 // indirect
@@ -129,6 +131,7 @@ require (
 	github.com/felixge/httpsnoop v1.0.1 // indirect
 	github.com/fluxcd/pkg/apis/acl v0.0.3 // indirect
 	github.com/fsnotify/fsnotify v1.5.1 // indirect
+	github.com/ghodss/yaml v1.0.0 // indirect
 	github.com/go-errors/errors v1.0.1 // indirect
 	github.com/go-git/gcfg v1.5.0 // indirect
 	github.com/go-logr/zapr v1.2.0 // indirect
@@ -191,22 +194,20 @@ require (
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/peterbourgon/diskv v2.0.1+incompatible // indirect
 	github.com/pkg/browser v0.0.0-20210115035449-ce105d075bb4 // indirect
-	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/prometheus/client_golang v1.12.1 // indirect
 	github.com/prometheus/client_model v0.2.0 // indirect
 	github.com/prometheus/common v0.32.1 // indirect
 	github.com/prometheus/procfs v0.7.3 // indirect
+	github.com/rivo/uniseg v0.2.0 // indirect
 	github.com/rs/xid v1.2.1 // indirect
 	github.com/rubenv/sql-migrate v0.0.0-20210614095031-55d5740dbbcc // indirect
 	github.com/russross/blackfriday v1.5.2 // indirect
 	github.com/sergi/go-diff v1.2.0 // indirect
 	github.com/shopspring/decimal v1.2.0 // indirect
-	github.com/sirupsen/logrus v1.8.1 // indirect
 	github.com/sosedoff/gitkit v0.3.0 // indirect
 	github.com/spf13/cast v1.4.1 // indirect
 	github.com/spf13/cobra v1.3.0 // indirect
-	github.com/stretchr/testify v1.7.1 // indirect
 	github.com/xanzy/ssh-agent v0.3.1 // indirect
 	github.com/xeipuuv/gojsonpointer v0.0.0-20180127040702-4e3ac2762d5f // indirect
 	github.com/xeipuuv/gojsonreference v0.0.0-20180127040603-bd5ef7bd5415 // indirect
@@ -242,10 +243,10 @@ require (
 	k8s.io/apiserver v0.23.4 // indirect
 	k8s.io/cli-runtime v0.23.4 // indirect
 	k8s.io/component-base v0.23.4 // indirect
+	k8s.io/helm v2.17.0+incompatible // indirect
 	k8s.io/klog/v2 v2.50.0 // indirect
 	k8s.io/kube-openapi v0.0.0-20220124234850-424119656bbf // indirect
 	k8s.io/kubectl v0.23.4 // indirect
-	oras.land/oras-go v1.1.0 // indirect
 	sigs.k8s.io/json v0.0.0-20211208200746-9f7c6b3444d2 // indirect
 	sigs.k8s.io/kustomize/api v0.10.1 // indirect
 	sigs.k8s.io/kustomize/kyaml v0.13.0 // indirect

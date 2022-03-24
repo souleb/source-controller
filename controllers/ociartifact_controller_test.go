@@ -17,19 +17,11 @@ limitations under the License.
 package controllers
 
 import (
-	"bytes"
-	"context"
 	"fmt"
-	"io"
 	"io/ioutil"
-	"os"
-	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/darkowlzz/controller-check/status"
-	"github.com/distribution/distribution/v3/configuration"
-	dockerRegistry "github.com/distribution/distribution/v3/registry"
 	_ "github.com/distribution/distribution/v3/registry/auth/htpasswd"
 	_ "github.com/distribution/distribution/v3/registry/storage/driver/inmemory"
 	"github.com/fluxcd/pkg/apis/meta"
@@ -37,11 +29,8 @@ import (
 	"github.com/fluxcd/pkg/runtime/patch"
 	sourcev1 "github.com/fluxcd/source-controller/api/v1beta2"
 	"github.com/fluxcd/source-controller/pkg/registry"
-	"github.com/onsi/gomega"
 	. "github.com/onsi/gomega"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/phayes/freeport"
-	"golang.org/x/crypto/bcrypt"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -49,81 +38,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-var (
-	testWorkspaceDir         = "registry-test"
-	testHtpasswdFileBasename = "authtest.htpasswd"
-	testUsername             = "myuser"
-	testPassword             = "mypass"
-)
-
-type RegistryClientTestServer struct {
-	Out                io.Writer
-	DockerRegistryHost string
-	WorkspaceDir       string
-	RegistryClient     *registry.Client
-}
-
-func SetupServer(g *gomega.WithT, server *RegistryClientTestServer) func(t *testing.T) {
-	// Create a temporary workspace directory for the registry
-	server.WorkspaceDir = testWorkspaceDir
-	os.RemoveAll(server.WorkspaceDir)
-	err := os.Mkdir(server.WorkspaceDir, 0700)
-	g.Expect(err).NotTo(HaveOccurred())
-
-	var out bytes.Buffer
-	server.Out = &out
-
-	// init test client
-	server.RegistryClient, err = registry.NewClient(
-		registry.ClientOptDebug(true),
-		registry.ClientOptWriter(server.Out),
-	)
-	g.Expect(err).NotTo(HaveOccurred())
-
-	// create htpasswd file (w BCrypt, which is required)
-	pwBytes, err := bcrypt.GenerateFromPassword([]byte(testPassword), bcrypt.DefaultCost)
-	g.Expect(err).NotTo(HaveOccurred())
-
-	htpasswdPath := filepath.Join(testWorkspaceDir, testHtpasswdFileBasename)
-	err = ioutil.WriteFile(htpasswdPath, []byte(fmt.Sprintf("%s:%s\n", testUsername, string(pwBytes))), 0644)
-	g.Expect(err).NotTo(HaveOccurred())
-
-	// Registry config
-	config := &configuration.Configuration{}
-	port, err := freeport.GetFreePort()
-	g.Expect(err).NotTo(HaveOccurred())
-
-	server.DockerRegistryHost = fmt.Sprintf("localhost:%d", port)
-	config.HTTP.Addr = fmt.Sprintf("127.0.0.1:%d", port)
-	config.HTTP.DrainTimeout = time.Duration(10) * time.Second
-	config.Storage = map[string]configuration.Parameters{"inmemory": map[string]interface{}{}}
-	config.Auth = configuration.Auth{
-		"htpasswd": configuration.Parameters{
-			"realm": "localhost",
-			"path":  htpasswdPath,
-		},
-	}
-	dockerRegistry, err := dockerRegistry.NewRegistry(context.Background(), config)
-	g.Expect(err).NotTo(HaveOccurred())
-
-	// Start Docker registry
-	go dockerRegistry.ListenAndServe()
-
-	return func(t *testing.T) {
-		t.Log("teardown test case")
-		os.RemoveAll(server.WorkspaceDir)
-	}
-}
-
 func TestOCIArtifactReconciler_Reconcile(t *testing.T) {
 	g := NewWithT(t)
 
-	server := RegistryClientTestServer{}
-	teardown := SetupServer(g, &server)
-	defer teardown(t)
-
 	// Login to the registry
-	err := server.RegistryClient.Login(server.DockerRegistryHost,
+	err := testRegistryserver.RegistryClient.Login(testRegistryserver.DockerRegistryHost,
 		registry.LoginOptBasicAuth(testUsername, testPassword),
 		registry.LoginOptInsecure(true))
 	g.Expect(err).NotTo(HaveOccurred())
@@ -144,11 +63,11 @@ func TestOCIArtifactReconciler_Reconcile(t *testing.T) {
 		},
 	}
 
-	ref := fmt.Sprintf("%s/ocirepo/%s:%s", server.DockerRegistryHost, "podinfo-kustomize", "1.0.0")
-	_, err = server.RegistryClient.Push(contents, ocispec.MediaTypeImageConfig, ref)
+	ref := fmt.Sprintf("%s/ocirepo/%s:%s", testRegistryserver.DockerRegistryHost, "podinfo-kustomize", "1.0.0")
+	_, err = testRegistryserver.RegistryClient.Push(contents, ocispec.MediaTypeImageConfig, ref)
 	g.Expect(err).NotTo(HaveOccurred())
 
-	pullResult, err := server.RegistryClient.Pull(ref)
+	pullResult, err := testRegistryserver.RegistryClient.Pull(ref)
 	g.Expect(err).NotTo(HaveOccurred())
 
 	g.Expect(*pullResult.Layers[0]).To(HaveField("MediaType", ocispec.MediaTypeImageLayerGzip))
@@ -176,7 +95,7 @@ func TestOCIArtifactReconciler_Reconcile(t *testing.T) {
 			Namespace:    ns.Name,
 		},
 		Spec: sourcev1.OCIRegistrySpec{
-			URL: fmt.Sprintf("%s/ocirepo/%s", server.DockerRegistryHost, "podinfo-kustomize"),
+			URL: fmt.Sprintf("%s/ocirepo/%s", testRegistryserver.DockerRegistryHost, "podinfo-kustomize"),
 			Authentication: &sourcev1.OCIRegistryAuth{
 				SecretRef: &meta.LocalObjectReference{
 					Name: secret.Name,

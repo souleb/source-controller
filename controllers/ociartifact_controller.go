@@ -67,6 +67,7 @@ var ociArtifactReadyConditions = summarize.Conditions{
 	Target: meta.ReadyCondition,
 	Owned: []string{
 		sourcev1.FetchFailedCondition,
+		sourcev1.StorageOperationFailedCondition,
 		sourcev1.ArtifactOutdatedCondition,
 		meta.ReadyCondition,
 		meta.ReconcilingCondition,
@@ -74,6 +75,7 @@ var ociArtifactReadyConditions = summarize.Conditions{
 	},
 	Summarize: []string{
 		sourcev1.SourceVerifiedCondition,
+		sourcev1.StorageOperationFailedCondition,
 		sourcev1.FetchFailedCondition,
 		sourcev1.ArtifactOutdatedCondition,
 		meta.StalledCondition,
@@ -81,6 +83,7 @@ var ociArtifactReadyConditions = summarize.Conditions{
 	},
 	NegativePolarity: []string{
 		sourcev1.FetchFailedCondition,
+		sourcev1.StorageOperationFailedCondition,
 		sourcev1.ArtifactOutdatedCondition,
 		meta.StalledCondition,
 		meta.ReconcilingCondition,
@@ -326,32 +329,6 @@ func (r *OCIArtifactReconciler) reconcileSource(ctx context.Context,
 		return sreconcile.ResultEmpty, e
 	}
 
-	isHelm := strings.Contains(registry.Spec.URL, "oci://")
-	if isHelm {
-		manifest, err := r.RegistryClient.PullManifest(ref.String())
-		if err != nil {
-			e := &serror.Event{
-				Err:    fmt.Errorf("failed to pull the artifact for reference '%s': %w", ref.String(), err),
-				Reason: sourcev1.OCIArtifactOperationFailedReason,
-			}
-			conditions.MarkTrue(obj, sourcev1.FetchFailedCondition, sourcev1.OCIArtifactOperationFailedReason, e.Err.Error())
-			// Return error to the world as observed may change
-			return sreconcile.ResultEmpty, e
-		}
-
-		// Helm chart, return ready condition with helm artifact reference
-		r.AnnotatedEventf(obj, map[string]string{
-			"revision": manifest.Digest.String(),
-		}, corev1.EventTypeNormal, "NewArtifact", "Helm Artifact with ref: %s", ref)
-
-		obj.Status.Artifact = &sourcev1.Artifact{
-			URL:      ref.String(),
-			Revision: manifest.Digest.String(),
-		}
-
-		return sreconcile.ResultSuccess, nil
-	}
-
 	// Pull the image
 	result, err := r.RegistryClient.Pull(ref.String())
 	if err != nil {
@@ -399,10 +376,12 @@ func (r *OCIArtifactReconciler) reconcileArtifact(ctx context.Context,
 
 	// Create artifact dir
 	if err := r.Storage.MkdirAll(*artifact); err != nil {
-		return sreconcile.ResultEmpty, &serror.Event{
+		e := &serror.Event{
 			Err:    fmt.Errorf("failed to create artifact directory: %w", err),
-			Reason: sourcev1.StorageOperationFailedReason,
+			Reason: sourcev1.DirCreationFailedReason,
 		}
+		conditions.MarkTrue(obj, sourcev1.StorageOperationFailedCondition, e.Reason, e.Err.Error())
+		return sreconcile.ResultEmpty, e
 	}
 
 	// Acquire lock.
@@ -441,10 +420,12 @@ func (r *OCIArtifactReconciler) reconcileArtifact(ctx context.Context,
 
 	// Archive directory to storage
 	if err := r.Storage.ArchiveTar(artifact, tar.NewReader(in), SourceIgnoreFilter(ps, ignoreDomain)); err != nil {
-		return sreconcile.ResultEmpty, &serror.Event{
-			Err:    fmt.Errorf("unable to archive artifact to storage: %w", err),
-			Reason: sourcev1.StorageOperationFailedReason,
+		e := &serror.Event{
+			Err:    fmt.Errorf("unable to archive artifact to storage: %s", err),
+			Reason: sourcev1.ArchiveOperationFailedReason,
 		}
+		conditions.MarkTrue(obj, sourcev1.StorageOperationFailedCondition, e.Reason, e.Err.Error())
+		return sreconcile.ResultEmpty, e
 	}
 	r.AnnotatedEventf(obj, map[string]string{
 		"revision": artifact.Revision,
@@ -457,7 +438,7 @@ func (r *OCIArtifactReconciler) reconcileArtifact(ctx context.Context,
 	// update latest symlink
 	url, err := r.Storage.Symlink(*artifact, "latest.tar.gz")
 	if err != nil {
-		r.eventLogf(ctx, obj, corev1.EventTypeWarning, sourcev1.StorageOperationFailedReason,
+		r.eventLogf(ctx, obj, events.EventTypeTrace, sourcev1.SymlinkUpdateFailedReason,
 			"failed to update status URL symlink: %s", err)
 	}
 
@@ -500,45 +481,12 @@ func (r *OCIArtifactReconciler) garbageCollect(ctx context.Context, obj *sourcev
 
 // credentials retrieves the credentials from Authentication
 func (r *OCIArtifactReconciler) credentials(ctx context.Context, obj *sourcev1.OCIRegistry) (registry.LoginOption, error) {
-	auth := obj.Spec.Authentication
-	if auth == nil {
-		return nil, nil
+	username, password, err := getRegistryCredentials(ctx, r.Client, obj)
+	if err != nil {
+		return nil, err
 	}
 
-	pullSecretNames := sets.NewString()
-	if auth.SecretRef != nil {
-		pullSecretNames.Insert(auth.SecretRef.Name)
-	}
-
-	// lookup service account
-	if auth.ServiceAccountName != "" {
-		serviceAccount := corev1.ServiceAccount{}
-		err := r.Get(ctx, types.NamespacedName{Namespace: obj.Namespace, Name: auth.ServiceAccountName}, &serviceAccount)
-		if err != nil {
-			return nil, err
-		}
-		for _, ips := range serviceAccount.ImagePullSecrets {
-			pullSecretNames.Insert(ips.Name)
-		}
-	}
-
-	// lookup image pull secrets
-
-	for _, imagePullSecretName := range pullSecretNames.List() {
-		imagePullSecret := corev1.Secret{}
-		err := r.Get(ctx, types.NamespacedName{Namespace: obj.Namespace, Name: imagePullSecretName}, &imagePullSecret)
-		if err != nil {
-			return nil, err
-		}
-
-		// retrieve the username and password from the secret
-		if len(imagePullSecret.Data) != 0 {
-			login := registry.LoginOptBasicAuth(string(imagePullSecret.Data["username"]), string(imagePullSecret.Data["password"]))
-			return login, nil
-		}
-	}
-
-	return nil, fmt.Errorf("no credentials found")
+	return registry.LoginOptBasicAuth(username, password), nil
 }
 
 func (r *OCIArtifactReconciler) reconcileDelete(ctx context.Context, obj *sourcev1.OCIArtifact) (sreconcile.Result, error) {
@@ -707,4 +655,45 @@ func (r *OCIArtifactReconciler) getRegistry(ctx context.Context, obj *sourcev1.O
 	}
 
 	return &registry, nil
+}
+
+func getRegistryCredentials(ctx context.Context, r client.Client, obj *sourcev1.OCIRegistry) (string, string, error) {
+	auth := obj.Spec.Authentication
+	if auth == nil {
+		return "", "", nil
+	}
+
+	pullSecretNames := sets.NewString()
+	if auth.SecretRef != nil {
+		pullSecretNames.Insert(auth.SecretRef.Name)
+	}
+
+	// lookup service account
+	if auth.ServiceAccountName != "" {
+		serviceAccount := corev1.ServiceAccount{}
+		err := r.Get(ctx, types.NamespacedName{Namespace: obj.GetNamespace(), Name: auth.ServiceAccountName}, &serviceAccount)
+		if err != nil {
+			return "", "", err
+		}
+		for _, ips := range serviceAccount.ImagePullSecrets {
+			pullSecretNames.Insert(ips.Name)
+		}
+	}
+
+	// lookup image pull secrets
+
+	for _, imagePullSecretName := range pullSecretNames.List() {
+		imagePullSecret := corev1.Secret{}
+		err := r.Get(ctx, types.NamespacedName{Namespace: obj.GetNamespace(), Name: imagePullSecretName}, &imagePullSecret)
+		if err != nil {
+			return "", "", err
+		}
+
+		// retrieve the username and password from the secret
+		if len(imagePullSecret.Data) != 0 {
+			return string(imagePullSecret.Data["username"]), string(imagePullSecret.Data["password"]), nil
+		}
+	}
+
+	return "", "", fmt.Errorf("no credentials found")
 }
