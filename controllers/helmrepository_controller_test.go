@@ -127,6 +127,30 @@ func TestHelmRepositoryReconciler_Reconcile(t *testing.T) {
 		return obj.Status.LastHandledReconcileAt == "now"
 	}, timeout).Should(BeTrue())
 
+	// Switch to a OCI helm repository type
+	obj.Spec.Type = sourcev1.HelmRepositoryTypeOCI
+	obj.Spec.URL = fmt.Sprintf("oci://%s", testRegistryserver.DockerRegistryHost)
+	g.Expect(testEnv.Update(ctx, obj)).To(Succeed())
+
+	// Wait for HelmRepository to be Ready
+	g.Eventually(func() bool {
+		if err := testEnv.Get(ctx, key, obj); err != nil {
+			return false
+		}
+		if !conditions.IsReady(obj) && obj.Status.Artifact == nil {
+			return false
+		}
+		readyCondition := conditions.Get(obj, meta.ReadyCondition)
+		return readyCondition.Status == metav1.ConditionTrue &&
+			obj.Generation == readyCondition.ObservedGeneration &&
+			obj.Generation == obj.Status.ObservedGeneration
+	}, timeout).Should(BeTrue())
+
+	// Check if the object status is valid.
+	condns = &status.Conditions{NegativePolarity: helmRepositoryOCIReadyCondition.NegativePolarity}
+	checker = status.NewChecker(testEnv.Client, condns)
+	checker.CheckErr(ctx, obj)
+
 	g.Expect(testEnv.Delete(ctx, obj)).To(Succeed())
 
 	// Wait for HelmRepository to be deleted
