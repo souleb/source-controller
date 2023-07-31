@@ -60,14 +60,14 @@ RUN export CGO_LDFLAGS="-static -fuse-ld=lld" && \
 # Ensure that the binary was cross-compiled correctly to the target platform.
 RUN xx-verify --static /source-controller
 
-FROM alpine:3.18
+FROM registry.access.redhat.com/ubi9/ubi
 
 ARG TARGETPLATFORM
-RUN apk --no-cache add ca-certificates \
-  && update-ca-certificates
+RUN yum install -y ca-certificates
 
 # Copy over binary from build
 COPY --from=build /source-controller /usr/local/bin/
+COPY LICENSE /licenses/LICENSE
 
 USER 65534:65534
 ENTRYPOINT [ "source-controller" ]
